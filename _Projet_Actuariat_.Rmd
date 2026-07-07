@@ -1,0 +1,2772 @@
+---
+title: "Analyse et prévision des accidents corporels dans les Hauts-de-Seine"
+author: "M"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  comment = "#>",
+  collapse = TRUE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 5
+)
+
+# Chargement des bibliothèques
+
+```{r, message=FALSE, warning=FALSE}
+
+required_packages <- c(
+  "tidyverse",
+  "forecast",
+  "tseries",
+  "ggplot2",
+  "ggfortify",
+  "DBI",
+  "RMariaDB",
+  "lubridate",
+  "zoo",
+  "readr",
+  "reshape2",
+  "GGally",
+  "car",
+  "dplyr",
+  "patchwork",
+  "gridExtra",
+  "cowplot",
+  "scales"
+
+)
+
+new_packages <- required_packages[
+  !(required_packages %in% rownames(installed.packages()))
+]
+
+if(length(new_packages) > 0){
+  install.packages(new_packages)
+}
+
+invisible(
+  lapply(
+    required_packages,
+    library,
+    character.only = TRUE
+  )
+)
+
+```
+
+# Importation et préparation des données
+
+Cette première étape consiste à mettre en place l'environnement de travail nécessaire à l'analyse. Les données sont importées, contrôlées puis préparées afin de garantir leur qualité avant les opérations de nettoyage, d'agrégation et de modélisation. Cette préparation constitue également une étape indispensable avant leur intégration dans la base de données MySQL, qui servira à centraliser les données et à faciliter les traitements relationnels réalisés dans les chapitres suivants.
+
+## Répertoire de travail
+
+Cette étape permet de définir le répertoire dans lequel se trouvent les fichiers du projet. Le code fixe le dossier de travail afin que R puisse accéder automatiquement aux fichiers de données et produire les différents résultats sans erreur de chemin d'accès.
+
+```{r}
+
+setwd("/home/zosia/SINISTRES")
+getwd()
+
+```
+
+La sortie confirme que le répertoire de travail est correctement défini sur le dossier SINISTRES. Toutes les opérations d'importation et d'exportation réalisées dans la suite du projet utiliseront ce répertoire comme emplacement de référence.
+
+
+
+##Création un dossier pour stocker les images
+
+```{r}
+dir.create("graphics", showWarnings = FALSE)
+```
+
+
+
+## Importation des données
+
+Cette étape consiste à importer le fichier contenant les accidents corporels dans un objet R. Les paramètres utilisés permettent de lire correctement un fichier CSV séparé par des points-virgules tout en conservant les variables textuelles sous forme de caractères afin de faciliter leur nettoyage ultérieur.
+
+```{r}
+accidents <- read.csv(
+  "accidents-corporels-de-la-circulation-routiere.csv",
+  sep = ";",
+  stringsAsFactors = FALSE,
+  encoding = "UTF-8"
+)
+
+```
+
+## Contrôle initial
+
+Après l'importation, un contrôle préliminaire est effectué afin de vérifier que les données ont été correctement chargées. Le code affiche les dimensions de la base, le nombre de variables ainsi que les premières observations, ce qui permet de contrôler rapidement la structure générale du jeu de données.
+
+```{r}
+cat("Dimensions :", dim(accidents), "\n")
+cat("Nombre de variables :", ncol(accidents), "\n")
+
+head(accidents)
+```
+
+Les résultats montrent que la base contient 41 266 observations décrites par 139 variables, ce qui confirme que l'importation s'est déroulée correctement. L'affichage des premières lignes permet de vérifier la présence des principales variables relatives aux caractéristiques des accidents, des véhicules, des usagers et de leur localisation. Ce contrôle constitue une première validation avant les opérations de transformation et de nettoyage qui seront réalisées par la suite.
+
+
+
+## Conversion des dates
+
+Cette étape convertit la variable date au format Date de R afin de permettre les traitements chronologiques. Le code vérifie également la période couverte par les données, ce qui est indispensable pour les futures analyses temporelles et la construction des séries chronologiques.
+
+```{r}
+accidents$date <- as.Date(accidents$date)
+
+cat("Période couverte :\n")
+print(range(accidents$date, na.rm = TRUE))
+```
+
+La conversion de la variable date au format Date de R est réalisée avec succès. La période d'observation s'étend du 1er janvier 2006 au 31 décembre 2021, soit seize années complètes. Cette couverture temporelle est suffisamment longue pour construire les séries chronologiques nécessaires à la modélisation SARIMA et SARIMAX.
+
+
+## Recodage des variables cibles
+
+Cette étape transforme les variables nombre de piétons impliqués et nombre de deux-roues motorisés impliqués en variables binaires indiquant simplement leur présence ou leur absence dans un accident. Ce recodage simplifie leur utilisation comme variables explicatives lors des analyses statistiques et de la modélisation.
+
+```{r}
+# Accident impliquant au moins un piéton
+accidents$nb_pie <- ifelse(
+  accidents$nb_pie > 0,
+  1L,
+  0L
+)
+
+# Accident impliquant au moins un deux-roues motorisé
+accidents$nb_mot <- ifelse(
+  accidents$nb_mot > 0,
+  1L,
+  0L
+)
+
+table(accidents$nb_pie)
+table(accidents$nb_mot)
+```
+
+Les distributions obtenues confirment que les variables nb_pie et nb_mot ont été correctement transformées en variables binaires indiquant respectivement la présence (1) ou l'absence (0) d'un piéton ou d'un deux-roues motorisé dans l'accident. Ces variables pourront être utilisées comme variables explicatives lors des analyses statistiques et de la modélisation.
+
+
+## Connexion à la base MySQL
+
+Cette étape établit la connexion entre R et la base de données MySQL contenant les données du projet. Les paramètres de connexion sont récupérés depuis un fichier d'environnement afin de sécuriser les identifiants d'accès. Cette connexion permettra d'exporter les données préparées, d'exécuter des requêtes SQL et de construire les tables utilisées dans la modélisation.
+
+```{r}
+readRenviron("~/.Renviron")
+
+con <- dbConnect(
+  RMariaDB::MariaDB(),
+  host = Sys.getenv("MYSQL_HOST"),
+  user = Sys.getenv("MYSQL_USER"),
+  password = Sys.getenv("MYSQL_PASSWORD"),
+  dbname = "projet_actuariat"
+  )
+```
+
+## Vérification de la connexion
+
+Après l'établissement de la connexion, une requête SQL simple est exécutée afin de vérifier que la communication entre R et MySQL fonctionne correctement et que la base de données attendue est bien sélectionnée.
+
+```{r}
+DBI::dbGetQuery(
+  con,
+  "SELECT DATABASE();"
+)
+
+```
+
+Le résultat de la requête confirme que la connexion entre R et MySQL est correctement établie et que la base de données projet_actuariat est bien sélectionnée. Cette vérification garantit que les opérations ultérieures d'exportation, de création de tables et d'exécution de requêtes SQL pourront être réalisées sans erreur de connexion.
+
+
+# Nettoyage et préparation des données
+
+Cette étape a pour objectif d'améliorer la qualité des données avant leur agrégation temporelle et leur utilisation dans les modèles statistiques. Les variables présentant des modalités incohérentes, des valeurs manquantes ou des différences de codification entre les années sont identifiées puis harmonisées afin de constituer une base de données fiable. Cette phase garantit également la cohérence des données qui seront ensuite stockées et exploitées dans la base MySQL pour la construction des tables d'analyse et des séries temporelles.
+
+## Définition des variables d'étude
+
+Cette étape consiste à définir les variables qui seront retenues pour les analyses descriptives, les traitements statistiques et la modélisation. Ces variables sont sélectionnées en raison de leur disponibilité sur l'ensemble de la période d'observation et de leur pertinence pour expliquer les accidents corporels. Cette sélection permet également de concentrer les opérations de nettoyage sur les variables réellement utiles et prépare les données qui seront ensuite exportées vers MySQL pour les traitements relationnels et les agrégations temporelles.
+
+```{r}
+vars_etude <- c(
+  "luminosite",
+  "cond_atmos",
+  "lieu",
+  "cat_route1",
+  "nb_pie",
+  "nb_mot"
+)
+```
+
+## Analyse de la qualité des données
+
+Cette étape consiste à examiner les modalités présentes dans chacune des variables d'étude afin de détecter les éventuelles incohérences, les anciennes nomenclatures, les valeurs manquantes ainsi que les modalités non renseignées. Ce diagnostic constitue une étape essentielle avant toute opération de nettoyage et garantit que les données stockées ultérieurement dans MySQL seront homogènes et adaptées aux analyses statistiques.
+
+### Exploration des modalités
+
+Le code parcourt automatiquement l'ensemble des variables retenues pour afficher la distribution de leurs modalités. Cette exploration permet d'identifier rapidement les anomalies de codification, les doublons de libellés ainsi que les modalités rares ou incomplètes qui devront être harmonisées.
+
+```{r}
+for(v in vars_etude){
+  
+  cat("\n====================================\n")
+  cat("Variable :", v, "\n")
+  cat("====================================\n")
+  
+  print(
+    accidents %>%
+      count(.data[[v]], sort = TRUE)
+  )
+  
+}
+```
+
+L’exploration des variables met en évidence plusieurs types d’incohérences susceptibles d’affecter les analyses.
+
+La variable Luminosité est principalement composée des modalités Plein jour (27 071 observations) et Nuit avec éclairage public allumé (7 938 observations). Elle contient également 2 504 modalités « Non renseignée » ainsi que 33 chaînes vides qui devront être harmonisées.
+
+La variable Conditions atmosphériques présente une coexistence entre des libellés textuels (Normales, Pluie légère, Temps couvert, etc.) et d’anciennes codifications numériques (1 à 9), révélant une évolution de la nomenclature au cours de la période étudiée.
+
+Pour la variable Lieu, plusieurs modalités décrivent une même situation mais avec des libellés différents, notamment Hors intersection et Hors-Int, ou encore Intersection en X et En X.
+
+La variable Catégorie de route comporte également des anciennes codifications numériques ainsi que quelques identifiants particuliers de routes (A14, A86, D19, N118, VC19, etc.) qui devront être regroupés dans des catégories homogènes.
+
+Enfin, les variables binaires nb_pie et nb_mot ne comportent que les modalités 0 et 1, ce qui confirme que leur codage est déjà cohérent.
+
+Cette exploration permet ainsi d’identifier précisément les opérations de nettoyage nécessaires avant la constitution de la base finale.
+
+
+## Nettoyage de la variable Luminosité
+
+Cette étape vise à vérifier la qualité de la variable Luminosité en recherchant les valeurs manquantes et les modalités incomplètes. Les éventuelles chaînes vides sont ensuite remplacées par une modalité explicite afin d'obtenir une codification homogène sur l'ensemble de la période d'étude.
+
+```{r}
+accidents %>%
+  count(luminosite, sort = TRUE)
+
+
+sum(accidents$luminosite == "", na.rm = TRUE)
+
+
+sum(is.na(accidents$luminosite))
+
+
+accidents <- accidents %>%
+  mutate(
+    luminosite_clean = case_when(
+      luminosite == "" ~ "Non renseignée",
+      TRUE ~ luminosite
+    )
+  )
+
+# Contrôle final
+table(accidents$luminosite_clean)
+
+# Vérification de cohérence
+stopifnot(
+  sum(table(accidents$luminosite_clean)) == nrow(accidents)
+)
+
+
+vars_etude[vars_etude == "luminosite"] <- "luminosite_clean"
+
+```
+
+L'exploration montre que la variable ne contient aucune valeur manquante (NA) mais présente 33 chaînes vides. Ces observations sont recodées sous la modalité « Non renseignée », ce qui permet d'uniformiser les informations manquantes.
+
+Après harmonisation, la variable comporte désormais 2 537 observations classées dans la catégorie « Non renseignée », tandis que les autres modalités conservent leurs effectifs initiaux. La vérification de cohérence confirme que le nombre total d'observations reste identique à celui de la base d'origine, garantissant qu'aucune donnée n'a été perdue lors du nettoyage.
+
+La nouvelle variable luminosite_clean constitue désormais la version de référence qui sera utilisée dans les analyses statistiques et qui sera utilisée lors de la création de la table accidents_propre dans MySQL. 
+
+
+
+## Nettoyage de la variable Conditions atmosphérique
+
+Cette étape consiste à harmoniser la variable Conditions atmosphériques afin de supprimer les différences de codification observées entre les différentes années. Les anciennes nomenclatures numériques sont regroupées avec leurs libellés actuels, tandis que les modalités manquantes sont uniformisées pour produire une variable cohérente.
+
+```{r}
+# Exploration des modalités
+accidents %>%
+  count(cond_atmos, sort = TRUE)
+
+# Vérification des valeurs manquantes
+sum(accidents$cond_atmos == "", na.rm = TRUE)
+sum(is.na(accidents$cond_atmos))
+
+# Harmonisation des modalités
+accidents <- accidents %>%
+  mutate(
+    cond_atmos_clean = case_when(
+      
+      cond_atmos %in% c("Normales", "1") ~ "Normales",
+      
+      cond_atmos %in% c("Pluie légère", "2") ~ "Pluie légère",
+      
+      cond_atmos %in% c("Pluie forte", "3") ~ "Pluie forte",
+      
+      cond_atmos %in% c("Neige / grêle", "4") ~ "Neige / grêle",
+      
+      cond_atmos %in% c("Brouillard / fumée", "5") ~ "Brouillard / fumée",
+      
+      cond_atmos %in% c("Vent fort / tempête", "6") ~ "Vent fort / tempête",
+      
+      cond_atmos %in% c("Temps éblouissant", "7") ~ "Temps éblouissant",
+      
+      cond_atmos %in% c("Temps couvert", "8") ~ "Temps couvert",
+      
+      cond_atmos %in% c("Autre", "9") ~ "Autre",
+      
+      cond_atmos %in% c("Non renseignées", "") ~ "Non renseignées",
+      
+      TRUE ~ "Non renseignées"
+    )
+  )
+
+# Contrôle final
+table(accidents$cond_atmos_clean)
+
+# Vérification de cohérence
+stopifnot(
+  sum(table(accidents$cond_atmos_clean)) == nrow(accidents)
+)
+
+vars_etude[vars_etude == "cond_atmos"] <- "cond_atmos_clean"
+```
+
+L'analyse confirme l'absence de valeurs NA, mais met en évidence 33 chaînes vides ainsi que plusieurs anciennes codifications numériques coexistantes avec les libellés actuels.
+
+Le recodage permet d'associer chaque ancienne valeur numérique à son équivalent textuel (Normales, Pluie légère, Temps couvert, etc.) tout en regroupant les modalités vides sous « Non renseignées ».
+
+Après harmonisation, la variable présente une nomenclature unique composée de dix catégories cohérentes. Les conditions Normales représentent la modalité la plus fréquente avec 30 949 observations, tandis que les modalités Non renseignées totalisent 2 537 observations.
+
+La vérification finale confirme que toutes les observations ont été conservées. La variable cond_atmos_clean remplace désormais la variable initiale dans la liste des variables d'étude et sera utilisée pour alimenter la table accidents_propre, à partir de laquelle seront construites les vues SQL du projet.
+
+
+## Nettoyage de la variable Lieu
+
+Cette étape consiste à harmoniser la variable Lieu afin d'éliminer les différences de codification observées entre plusieurs années de collecte. Certaines modalités décrivent une même configuration d'accident mais utilisent des libellés différents. Le nettoyage permet de regrouper ces modalités sous une nomenclature unique, garantissant ainsi une meilleure cohérence des analyses statistiques et des traitements réalisés ultérieurement dans MySQL.
+
+```{r}
+# Exploration de la variable lieu
+accidents %>%
+  count(lieu, sort = TRUE)
+
+# Vérification des valeurs manquantes
+sum(accidents$lieu == "", na.rm = TRUE)
+
+sum(is.na(accidents$lieu))
+
+# Harmonisation des modalités
+accidents <- accidents %>%
+  mutate(
+    lieu_clean = case_when(
+      
+      lieu %in% c(
+        "Hors intersection",
+        "Hors-Int"
+      ) ~ "Hors intersection",
+      
+      lieu %in% c(
+        "Intersection en X",
+        "En X"
+      ) ~ "Intersection en X",
+      
+      lieu %in% c(
+        "Intersection en T",
+        "En T"
+      ) ~ "Intersection en T",
+      
+      TRUE ~ lieu
+      
+    )
+  )
+
+# Contrôle final
+table(accidents$lieu_clean)
+
+# Vérification de cohérence
+stopifnot(
+  sum(table(accidents$lieu_clean)) == nrow(accidents))
+```
+
+L'exploration de la variable montre que les observations sont principalement classées dans la catégorie "Hors intersection", suivie des intersections en X puis des intersections en T. Elle met également en évidence quelques différences d'écriture telles que Hors-Int au lieu de Hors intersection, ou encore En X et En T à la place de Intersection en X et Intersection en T.
+
+Les contrôles montrent qu'aucune valeur manquante ni chaîne vide n'est présente dans cette variable. Le nettoyage consiste donc uniquement à fusionner les modalités équivalentes afin d'obtenir une nomenclature homogène.
+
+Après harmonisation, les effectifs des principales catégories sont correctement regroupés : les modalités Hors intersection, Intersection en X et Intersection en T intègrent désormais les anciennes dénominations utilisées dans certaines années. La vérification finale confirme que le nombre total d'observations reste inchangé, ce qui garantit qu'aucune donnée n'a été perdue au cours du recodage.
+
+La nouvelle variable lieu_clean constitue désormais la variable de référence qui sera utilisée dans les analyses statistiques ainsi que dans les traitements réalisés au sein de la base MySQL.
+
+
+
+## Nettoyage de la variable Catégorie de route
+
+Cette étape vise à harmoniser la variable Catégorie de route, qui présente plusieurs systèmes de codification selon les années d'observation. Le code identifie les anciennes nomenclatures, les identifiants de routes et les modalités atypiques afin de les regrouper dans des catégories homogènes. Cette standardisation est indispensable pour garantir la cohérence des analyses et faciliter les agrégations effectuées dans MySQL.
+
+```{r}
+# Vérification des modalités atypiques
+accidents %>%
+  filter(
+    !cat_route1 %in% c(
+      "Autoroute",
+      "Route nationale",
+      "Route départementale",
+      "Voie communale",
+      "Hors réseau public",
+      "Parc de stationnement ouvert à la circulation publique",
+      "Autre",
+      "1", "2", "3", "4", "5", "6", "9",
+      ""
+    )
+  ) %>%
+  count(cat_route1, sort = TRUE)
+
+# Recodage des anciennes nomenclatures et des valeurs aberrantes
+accidents <- accidents %>%
+  mutate(
+    cat_route1_clean = case_when(
+      
+      # Libellés actuels et anciens codes
+      cat_route1 %in% c("Autoroute", "1") ~ "Autoroute",
+      cat_route1 %in% c("Route nationale", "2") ~ "Route nationale",
+      cat_route1 %in% c("Route départementale", "3") ~ "Route départementale",
+      cat_route1 %in% c("Voie communale", "4") ~ "Voie communale",
+      cat_route1 %in% c("Hors réseau public", "5") ~ "Hors réseau public",
+      cat_route1 %in% c(
+        "Parc de stationnement ouvert à la circulation publique",
+        "6"
+      ) ~ "Parc stationnement",
+      cat_route1 %in% c("Autre", "9") ~ "Autre",
+      
+      # Quelques observations contenant des identifiants de routes
+      grepl("^A", cat_route1)  ~ "Autoroute",
+      grepl("^N", cat_route1)  ~ "Route nationale",
+      grepl("^D", cat_route1)  ~ "Route départementale",
+      grepl("^VC", cat_route1) ~ "Voie communale",
+      
+      # Chaînes vides
+      TRUE ~ "Non renseigné"
+    )
+  )
+
+# Regroupement des catégories très peu représentées
+accidents <- accidents %>%
+  mutate(
+    cat_route_final = case_when(
+      cat_route1_clean %in% c(
+        "Autre",
+        "Hors réseau public",
+        "Parc stationnement"
+      ) ~ "Autres",
+      
+      TRUE ~ cat_route1_clean
+    )
+  )
+
+# Contrôle final
+table(accidents$cat_route_final)
+
+# Vérification de cohérence
+stopifnot(
+  sum(table(accidents$cat_route_final)) == nrow(accidents)
+)
+
+
+vars_etude[vars_etude == "cat_route1"] <- "cat_route_final"
+vars_etude[vars_etude == "lieu"] <- "lieu_clean"
+```
+
+L'exploration met en évidence plusieurs modalités atypiques correspondant à des identifiants précis de routes, tels que A14, A86, N118, D19, VC19, ainsi que diverses adresses particulières. Ces modalités sont très peu représentées et ne correspondent pas à la nomenclature principale utilisée dans le reste de la base.
+
+Le recodage permet d'abord d'associer les anciennes codifications numériques aux catégories actuelles (Autoroute, Route nationale, Route départementale, Voie communale, etc.). Les identifiants de routes sont ensuite automatiquement reclassés grâce à leurs préfixes (A, N, D ou VC), ce qui assure une harmonisation complète de la variable.
+
+Enfin, les catégories très peu fréquentes telles que Autre, Hors réseau public et Parc stationnement sont regroupées dans une catégorie unique Autres, afin de limiter la dispersion des modalités et d'améliorer la robustesse des analyses statistiques.
+
+Le contrôle final confirme que la variable harmonisée comporte principalement 23 532 routes départementales, 9 939 voies communales, 4 762 autoroutes et 1 599 routes nationales. Seules 1 373 observations restent classées comme Non renseigné, ce qui correspond aux informations absentes dans les données d'origine.
+
+La variable cat_route_final remplace désormais la variable initiale dans la liste des variables d'étude. Cette harmonisation garantit une nomenclature unique de la catégorie de route et facilitera les agrégations réalisées dans la table accidents_propre ainsi que les vues SQL construites dans MySQL.
+
+
+
+## Vérification des variables binaires
+
+Cette étape consiste à contrôler les variables binaires représentant la présence d'au moins un piéton et d'au moins un deux-roues motorisé dans un accident. Les vérifications portent sur la structure des variables, la présence éventuelle de valeurs manquantes ainsi que sur la cohérence de leur codage avant leur utilisation dans les analyses statistiques.
+
+### Vérification de la variable Nombre de piétons
+
+Cette vérification permet de confirmer que la variable nb_pie possède une structure conforme à une variable binaire et qu'aucune anomalie susceptible d'affecter les analyses n'est présente.
+
+```{r}
+# Exploration des modalités
+accidents %>%
+  count(nb_pie, sort = TRUE)
+
+# Structure
+str(accidents$nb_pie)
+
+# Valeurs manquantes
+sum(is.na(accidents$nb_pie))
+
+
+# Résumé statistique
+summary(accidents$nb_pie)
+
+
+# Aucun nettoyage nécessaire
+accidents$nb_pie_clean <- accidents$nb_pie
+
+stopifnot(
+  sum(!is.na(accidents$nb_pie_clean)) == nrow(accidents)
+)
+
+```
+
+Les résultats montrent que la variable comporte uniquement les modalités 0 et 1, représentant respectivement les accidents n'impliquant aucun piéton et ceux impliquant au moins un piéton. La structure de la variable confirme qu'il s'agit bien d'une variable entière binaire.
+
+Le contrôle des valeurs manquantes indique qu'aucune observation n'est absente. Les statistiques descriptives confirment que la moyenne de la variable est égale à 0,2269, ce qui signifie que 22,69 % des accidents impliquent au moins un piéton, tandis que la majorité des accidents n'en impliquent aucun.
+
+Aucune opération de nettoyage supplémentaire n'étant nécessaire, la variable est simplement copiée dans nb_pie_clean afin de conserver une nomenclature homogène avec les autres variables nettoyées. Cette variable pourra être utilisée directement dans les analyses statistiques ainsi que dans les traitements réalisés sous MySQL.
+
+
+
+### Vérification de la variable Nombre de motos
+
+Cette étape consiste à vérifier la qualité de la variable nb_mot, qui indique la présence ou l'absence d'au moins un deux-roues motorisé dans un accident. Les contrôles portent sur la structure de la variable, la présence de valeurs manquantes et la cohérence de son codage.
+
+```{r}
+# Exploration des modalités
+accidents %>%
+  count(nb_mot, sort = TRUE)
+
+# Structure
+str(accidents$nb_mot)
+
+# Valeurs manquantes
+sum(is.na(accidents$nb_mot))
+
+
+# Résumé statistique
+summary(accidents$nb_mot)
+```
+
+Les résultats montrent que la variable est correctement codée sous forme binaire avec uniquement les modalités 0 et 1. Aucune valeur manquante n'est observée, ce qui confirme l'intégrité de cette variable.
+
+Les statistiques descriptives indiquent que La moyenne de 0,3631 indique que 36,31 % des accidents impliquent au moins un deux-roues motorisé, tandis que les autres accidents n'en concernent pas.
+
+Ces contrôles confirment que la variable est directement exploitable dans les analyses descriptives, les modèles statistiques ainsi que dans les traitements SQL réalisés au sein de MySQL, sans nécessiter de nettoyage supplémentaire.
+
+
+
+## Contrôle des valeurs manquantes
+
+Cette étape consiste à vérifier qu'aucune valeur manquante ne subsiste dans les variables retenues pour la modélisation après les différentes opérations de nettoyage et d'harmonisation. Ce contrôle permet de garantir la qualité de la base de données avant son utilisation dans les analyses statistiques et son intégration dans la base MySQL.
+
+```{r}
+sapply(
+  accidents[, c(
+    "cat_route_final",
+    "luminosite_clean",
+    "cond_atmos_clean",
+    "lieu_clean",
+    "nb_pie",
+    "nb_mot"
+  )],
+  function(x) sum(is.na(x))
+)
+```
+
+Les résultats montrent qu'aucune des variables d'étude ne contient de valeur manquante. Les variables cat_route_final, luminosite_clean, cond_atmos_clean, lieu_clean, nb_pie et nb_mot présentent toutes un nombre de valeurs manquantes égal à zéro.
+
+Ce contrôle confirme que les opérations de nettoyage ont permis d'obtenir un jeu de données complet. L'absence de valeurs manquantes évite les biais lors des analyses statistiques et garantit le bon fonctionnement des traitements réalisés dans MySQL.
+
+
+## Contrôle des modalités « Non renseigné »
+
+Après la vérification des valeurs manquantes, cette étape consiste à quantifier les modalités explicitement codées comme « Non renseigné » ou « Non renseignée ». Contrairement aux valeurs manquantes, ces observations sont conservées afin de préserver l'information disponible tout en permettant d'évaluer la qualité globale de la base de données.
+
+```{r}
+accidents %>%
+  summarise(
+    route_non_renseignee =
+      sum(cat_route_final == "Non renseigné"),
+    
+    luminosite_non_renseignee =
+      sum(luminosite_clean == "Non renseignée"),
+    
+    cond_atmos_non_renseignee =
+      sum(cond_atmos_clean == "Non renseignées"),
+    
+    lieu_non_renseigne =
+      sum(lieu_clean == "Non renseigné")
+  )
+```
+
+Les résultats indiquent que 2 537 observations restent classées comme « Non renseignée » pour les variables Luminosité et Conditions atmosphériques, tandis que 2 504 observations sont codées « Non renseigné » pour la variable Lieu. La variable Catégorie de route comporte quant à elle 1 373 observations appartenant à cette modalité.
+
+Ces modalités proviennent principalement des informations absentes dans les données d'origine et ne résultent pas des opérations de nettoyage. Leur conservation permet de maintenir l'intégralité des observations tout en identifiant explicitement les informations indisponibles.
+
+Dans la base MySQL, ces modalités homogènes faciliteront les requêtes SQL permettant de mesurer la qualité des données, de calculer les proportions d'informations non renseignées ou encore d'exclure ces observations lors d'analyses spécifiques si nécessaire.
+
+
+
+## Évolution annuelle de la qualité des données
+
+Cette étape analyse l'évolution de la qualité des données sur l'ensemble de la période d'étude. Le code calcule, pour chaque année, la proportion de modalités non renseignées dans les principales variables d'étude afin d'identifier les éventuelles différences de qualité entre les années de collecte.
+
+```{r}
+qualite_annuelle <- accidents %>%
+  mutate(annee = format(date, "%Y")) %>%
+  group_by(annee) %>%
+  summarise(
+    n = n(),
+    
+    pct_non_rens_lumi =
+      mean(luminosite_clean == "Non renseignée"),
+    
+    pct_non_rens_meteo =
+      mean(cond_atmos_clean == "Non renseignées"),
+    
+    pct_non_rens_lieu =
+      mean(lieu_clean == "Non renseigné"),
+    
+    pct_non_rens_route =
+      mean(cat_route_final == "Non renseigné")
+  )
+
+print(qualite_annuelle)
+
+accidents %>%
+  filter(cat_route_final == "Non renseigné") %>%
+  count(annee = format(date, "%Y"))
+```
+
+Les résultats mettent en évidence une amélioration de la qualité des données au cours de la période étudiée.
+
+L'année 2006 présente une proportion très élevée de modalités « Non renseigné » pour les variables Luminosité, Conditions atmosphériques et Lieu. En effet, le tableau montre que 100 % des observations de 2006 sont classées comme « Non renseignée » ou « Non renseigné » pour ces trois variables (proportion égale à 1). Cette situation traduit une qualité de renseignement plus faible au début de la période d'observation.
+
+À partir de 2007, ces proportions deviennent nulles pour les variables Luminosité, Conditions atmosphériques et Lieu, ce qui témoigne d'une amélioration importante de la qualité des informations collectées. Les seules exceptions concernent les années 2020 et 2021, où l'on observe de très faibles proportions de modalités « Non renseignée » pour les variables Luminosité et Conditions atmosphériques, respectivement de 1,08 % et 0,49 %.
+
+Pour la variable Catégorie de route, les modalités « Non renseigné » sont principalement concentrées sur les premières années de la période. Les comptages montrent 644 observations en 2006 et 722 en 2007, auxquelles s'ajoutent seulement 6 observations en 2019 et 1 observation en 2020. Ces résultats indiquent que la quasi-totalité des informations manquantes concernant cette variable provient des premières années de la base.
+
+Cette analyse met ainsi en évidence une amélioration progressive de la qualité des données au fil du temps. Elle permet également de mieux interpréter les analyses temporelles qui seront réalisées à partir des données agrégées dans MySQL.
+
+
+
+## Contrôle final des données
+
+Cette dernière étape valide l'ensemble des opérations de préparation réalisées au cours du chapitre. Plusieurs contrôles sont effectués afin de vérifier les dimensions de la base, la période couverte, l'absence de valeurs manquantes, la cohérence des variables d'étude ainsi que la distribution finale des variables binaires. Cette validation garantit que les données sont prêtes à être utilisées pour les traitements SQL, les analyses statistiques et la modélisation.
+
+```{r}
+cat("========== CONTRÔLE FINAL ==========\n\n")
+
+# Dimensions
+cat("Nombre d'observations :", nrow(accidents), "\n")
+cat("Nombre de variables   :", ncol(accidents), "\n\n")
+
+# Période couverte
+cat("Période couverte :\n")
+print(range(accidents$date, na.rm = TRUE))
+
+cat("\n")
+
+# Valeurs manquantes
+cat("Valeurs manquantes par variable d'étude :\n")
+
+sapply(
+  accidents[vars_etude],
+  function(x) sum(is.na(x))
+)
+
+cat("\n")
+
+# Modalités restantes "Non renseigné"
+cat("Modalités 'Non renseigné' restantes :\n")
+
+sapply(
+  accidents[vars_etude],
+  function(x)
+    sum(grepl("Non renseign", x, ignore.case = TRUE),
+        na.rm = TRUE)
+)
+
+cat("\n")
+
+# Vérification des variables binaires
+
+table(accidents$nb_pie)
+
+table(accidents$nb_mot)
+```
+
+Les contrôles finaux confirment que la base préparée contient 41 266 observations décrites par 145 variables, couvrant la période du 1er janvier 2006 au 31 décembre 2021. L’augmentation du nombre de variables par rapport à la base initiale (139 variables) résulte de la création des variables harmonisées utilisées pour les analyses.
+
+Les vérifications montrent qu’aucune des variables d’étude (luminosite_clean, cond_atmos_clean, lieu_clean, cat_route_final, nb_pie et nb_mot) ne contient de valeur manquante (NA). Les seules informations incomplètes correspondent désormais aux modalités explicitement codées « Non renseigné » ou « Non renseignée », conservées afin de préserver l’ensemble des observations.
+
+Les variables binaires présentent uniquement les modalités 0 et 1. La variable nb_pie recense 31 903 accidents sans piéton et 9 363 avec au moins un piéton, tandis que nb_mot distingue 26 281 accidents sans deux-roues motorisé et 14 985 avec au moins un deux-roues motorisé, confirmant la cohérence du recodage.
+
+L’ensemble de ces contrôles valide la qualité de la base de données préparée. Les données sont désormais prêtes à être intégrées dans la table accidents_propre de la base projet_actuariat, qui servira ensuite à la création des vues SQL (accidents_mensuels, accidents_annuels, etc.) utilisées pour les analyses descriptives et la modélisation présentées dans les chapitres suivants.
+
+
+# Préparation de la base SQL
+
+Cette étape consiste à préparer une version finale des données nettoyées avant leur intégration dans la base de données MySQL. Les variables retenues sont sélectionnées, harmonisées et converties dans un format compatible avec la base relationnelle. Cette préparation garantit la cohérence des données stockées dans MySQL et facilite les requêtes SQL nécessaires à la création des tables agrégées ainsi qu'à la construction des séries temporelles utilisées dans la modélisation.
+
+## Construction de la table finale
+
+Cette étape consiste à construire la table finale qui sera importée dans la base MySQL. Les variables nettoyées sont sélectionnées, renommées afin de retrouver leurs noms d'origine, puis converties dans un format adapté aux traitements statistiques et aux opérations réalisées dans la base de données relationnelle.
+
+```{r}
+accidents_propre <- accidents %>%
+  select(
+    date,
+    luminosite_clean,
+    cond_atmos_clean,
+    lieu_clean,
+    cat_route_final,
+    nb_pie,
+    nb_mot
+  ) %>%
+  rename(
+    luminosite = luminosite_clean,
+    cond_atmos = cond_atmos_clean,
+    lieu = lieu_clean,
+    cat_route1 = cat_route_final
+  ) %>%
+  mutate(
+    date = as.Date(date),
+    nb_pie = as.integer(nb_pie),
+    nb_mot = as.integer(nb_mot)
+  )
+
+str(accidents_propre)
+
+table(accidents_propre$nb_pie)
+
+table(accidents_propre$nb_mot)
+```
+
+Les résultats montrent que la table accidents_propre contient 41 266 observations réparties sur 7 variables.
+
+La structure de la table indique que la variable date est enregistrée au format Date, les variables luminosite, cond_atmos, lieu et cat_route1 sont de type caractère (character), tandis que nb_pie et nb_mot sont de type entier (integer).
+
+Les distributions des variables binaires confirment que le recodage réalisé lors des étapes précédentes a été conservé. La variable nb_pie comporte 31 903 accidents sans piéton et 9 363 accidents impliquant au moins un piéton. De même, la variable nb_mot comporte 26 281 accidents sans deux-roues motorisé et 14 985 accidents impliquant au moins un deux-roues motorisé.
+
+Cette table constitue la version finale des données qui sera exportée dans MySQL.
+
+
+
+## Contrôle final
+
+Avant l'exportation vers MySQL, un contrôle final est réalisé afin de vérifier la structure de la table, les types des variables, l'absence de valeurs manquantes ainsi que la cohérence des différentes modalités. Cette étape garantit que les données sont conformes aux exigences des traitements réalisés dans la base de données relationnelle.
+
+```{r}
+str(accidents_propre)
+
+summary(accidents_propre)
+
+colSums(is.na(accidents_propre))
+
+nrow(accidents_propre)
+
+table(accidents_propre$luminosite)
+
+table(accidents_propre$cond_atmos)
+
+table(accidents_propre$lieu)
+
+table(accidents_propre$cat_route1)
+
+table(accidents_propre$nb_pie)
+
+table(accidents_propre$nb_mot)
+```
+
+Les résultats confirment que la table finale contient 41 266 observations et 7 variables, couvrant la période comprise entre le 1er janvier 2006 et le 31 décembre 2021.
+
+Les statistiques descriptives montrent que les variables binaires conservent les mêmes caractéristiques que lors des étapes précédentes. La moyenne de nb_pie est de 0,2269, ce qui correspond à la proportion d'accidents impliquant au moins un piéton, tandis que celle de nb_mot est de 0,3631, correspondant à la proportion d'accidents impliquant au moins un deux-roues motorisé.
+
+Le contrôle des valeurs manquantes indique qu'aucune des sept variables ne contient de valeur NA. Les tableaux de fréquences montrent également que les modalités des variables luminosite, cond_atmos, lieu et cat_route1 correspondent aux résultats obtenus après les opérations de nettoyage et d'harmonisation.
+
+L'ensemble de ces vérifications confirme la cohérence de la table accidents_propre avant son exportation vers MySQL.
+
+
+
+## Export vers MySQL
+
+Cette étape permet d'exporter la table finale depuis R vers la base de données MySQL. La fonction utilisée crée ou remplace automatiquement la table accidents_propre, qui devient la table de référence pour l'ensemble des traitements relationnels réalisés dans le projet.
+
+```{r}
+dbWriteTable(
+  con,
+  "accidents_propre",
+  accidents_propre,
+  overwrite = TRUE,
+  row.names = FALSE
+)
+```
+
+L'exécution de la fonction dbWriteTable() lance l'exportation de la table accidents_propre vers la base de données projet_actuariat. L'argument overwrite = TRUE indique que toute table existante portant le même nom est remplacée par la nouvelle version.
+
+La réussite de cette opération est vérifiée dans l'étape suivante à l'aide de plusieurs requêtes SQL exécutées directement dans MySQL.
+
+
+
+## Vérification de l'import
+
+Après l'exportation, plusieurs requêtes SQL sont exécutées afin de vérifier que la table a été correctement créée dans MySQL. Les contrôles portent sur le nombre d'observations, la structure de la table ainsi que la cohérence des principales variables binaires.
+
+```{r}
+DBI::dbGetQuery(
+  con,
+  "SELECT COUNT(*) AS n FROM accidents_propre"
+)
+
+dbListFields(
+  con,
+  "accidents_propre"
+)
+
+DBI::dbGetQuery(
+  con,
+  "SELECT nb_mot, COUNT(*) AS n
+   FROM accidents_propre
+   GROUP BY nb_mot"
+)
+
+DBI::dbGetQuery(
+  con,
+  "SELECT nb_pie, COUNT(*) AS n
+   FROM accidents_propre
+   GROUP BY nb_pie"
+)
+```
+
+Les résultats montrent que la table accidents_propre contient 41 266 observations, soit le même nombre que la table préparée sous R. Cette correspondance confirme que l'importation a conservé l'ensemble des observations.
+
+La liste des champs retournée par dbListFields() montre que la table comporte les sept variables attendues : date, luminosite, cond_atmos, lieu, cat_route1, nb_pie et nb_mot.
+
+Les requêtes SQL exécutées sur les variables nb_pie et nb_mot retournent les mêmes effectifs que ceux obtenus sous R (31 903 et 9 363 pour nb_pie, 26 281 et 14 985 pour nb_mot), ce qui confirme la cohérence des données après leur importation dans MySQL.
+
+Ces contrôles valident la structure et le contenu de la table créée dans la base de données.
+
+
+
+## Aperçu des données importées 
+
+Cette dernière étape consiste à afficher un échantillon des premières observations directement depuis la base MySQL. Cette vérification visuelle permet de contrôler la bonne restitution des données après leur importation et de confirmer que les variables ont été correctement enregistrées.
+
+```{r}
+DBI::dbGetQuery(
+  con,
+  "
+  SELECT *
+  FROM accidents_propre
+  LIMIT 5
+  "
+)
+```
+
+L'affichage des cinq premières observations montre que les variables date, luminosite, cond_atmos, lieu, cat_route1, nb_pie et nb_mot sont correctement restituées dans la table accidents_propre.
+
+Les valeurs affichées sont cohérentes avec celles obtenues lors de la préparation des données sous R, ce qui confirme que la structure de la table a été conservée après l'importation dans MySQL.
+
+Cette vérification constitue un contrôle visuel de la table avant son utilisation pour les requêtes SQL et les traitements réalisés dans les chapitres suivants.
+
+
+# Importation de la table mensuelle
+
+Cette étape consiste à importer la table agrégée mensuellement depuis la base de données MySQL vers l'environnement R afin de procéder à la modélisation.
+
+Note méthodologique concernant la période d'étude (Exclusion de l'année 2006)
+
+Bien que la base de données brute s'étende initialement du 1er janvier 2006 au 31 décembre 2021, les analyses préliminaires de la qualité des données (détaillées dans la section 2.10) ont révélé que l'année 2006 présente un taux de non-réponse de 100 % sur plusieurs variables clés, telles que les conditions atmosphériques, la luminosité et le lieu.
+
+L'intégration de cette période fausserait l'analyse des facteurs exogènes et dégraderait la qualité des prévisions. Par conséquent, afin de garantir la robustesse et la cohérence de la modélisation SARIMAX, la série temporelle mensuelle a été restreinte à la période allant de janvier 2007 à décembre 2021.
+
+## Lecture de la table agrégée
+
+Cette étape permet d'importer depuis MySQL la table accidents_mensuels, créée lors des traitements SQL d'agrégation. Les observations sont triées par année puis par mois afin d'obtenir une série temporelle parfaitement ordonnée pour les analyses ultérieures.
+
+```{r}
+sarimax_sql <- dbGetQuery(
+  con,
+  "
+  SELECT *
+  FROM accidents_mensuels
+  ORDER BY annee, mois
+  "
+)
+```
+
+Cette requête récupère directement la table mensuelle produite dans MySQL. Le tri chronologique réalisé grâce à la clause ORDER BY garantit que les observations sont importées dans l'ordre temporel, condition indispensable pour les analyses de séries temporelles. Cette étape illustre le rôle de MySQL comme système de stockage et de prétraitement des données agrégées, tandis que R est utilisé pour les analyses statistiques.
+
+
+
+## Aperçu des noms des variables
+
+Cette étape consiste à identifier les variables disponibles dans la table importée afin de vérifier que toutes les informations nécessaires à la modélisation ont bien été récupérées depuis MySQL.
+
+```{r}
+names(sarimax_sql)
+```
+
+Les variables affichées correspondent aux indicateurs mensuels calculés lors des traitements SQL. On retrouve notamment l'année, le mois, le nombre mensuel d'accidents ainsi que les différentes proportions utilisées comme variables explicatives. Ce contrôle confirme que la structure de la table MySQL est conforme aux besoins de la modélisation.
+
+
+
+## Contrôle des données mensuelles
+
+Avant de construire les modèles statistiques, il est nécessaire de vérifier la structure de la table importée. Les types des variables, leurs dimensions ainsi que leur organisation sont contrôlés afin de garantir leur compatibilité avec les fonctions de modélisation disponibles sous R.
+
+### Conversion du nombre d'accidents en numérique
+
+Cette étape consiste à convertir explicitement la variable représentant le nombre mensuel d'accidents en format numérique afin d'assurer sa compatibilité avec les méthodes statistiques utilisées par la suite.
+
+```{r}
+sarimax_sql <- sarimax_sql %>%
+  mutate(
+    nb_accidents = as.numeric(nb_accidents)
+  )
+```
+
+La conversion garantit que la variable réponse est bien reconnue comme une variable quantitative. Même si MySQL conserve déjà cette information sous un format numérique, cette vérification sous R sécurise les traitements ultérieurs et évite les erreurs liées à une mauvaise interprétation du type de données.
+
+
+
+
+### Vérification de la structur
+
+Cette étape permet d'examiner la structure complète de la table afin de vérifier le type de chaque variable importée depuis MySQL.
+
+```{r}
+str(sarimax_sql)
+```
+
+La structure confirme que la base contient 180 observations mensuelles décrites par 9 variables. Les années et les mois sont codés en entiers tandis que les indicateurs agrégés sont numériques. Cette organisation est parfaitement adaptée aux analyses temporelles et confirme que l'importation depuis MySQL s'est déroulée correctement.
+
+
+
+### Dimensions de la table
+
+Cette étape vérifie le nombre de lignes et de colonnes de la table mensuelle afin de confirmer que l'ensemble des observations attendues a bien été importé.
+
+```{r}
+dim(sarimax_sql)
+```
+
+Le résultat indique que la table comporte 180 observations et 9 variables. Les 180 observations correspondent aux mois de la période d'étude, ce qui confirme que la table mensuelle construite dans MySQL a été intégralement récupérée sous R.
+
+
+
+### Noms des variables
+
+Cette vérification permet de contrôler une nouvelle fois les variables présentes dans la base afin de confirmer que toutes les variables explicatives nécessaires sont disponibles avant les analyses statistiques.
+
+```{r}
+names(sarimax_sql)
+```
+
+Les noms affichés confirment la présence de l'ensemble des variables issues des agrégations SQL. Cette vérification permet également de s'assurer que les intitulés des variables sont cohérents et pourront être utilisés directement dans les modèles SARIMAX sans modification supplémentaire.
+
+
+
+## Validation des données
+
+Après l'importation, plusieurs contrôles sont réalisés afin de vérifier que les données agrégées sont complètes, cohérentes et directement exploitables pour la modélisation des séries temporelles.
+
+### Vérification de la période couverte
+
+Cette étape consiste à afficher les premières et les dernières observations de la table afin de vérifier que la période d'étude est complète et correctement ordonnée.
+
+```{r}
+head(
+  sarimax_sql %>%
+    select(annee, mois, nb_accidents),
+  12
+)
+
+tail(
+  sarimax_sql %>%
+    select(annee, mois, nb_accidents),
+  12
+)
+```
+
+Les premières observations correspondent aux douze mois de l'année 2007, de janvier à décembre, tandis que les dernières observations couvrent les douze mois de l'année 2021, également de janvier à décembre. Les données sont présentées dans l'ordre chronologique, ce qui confirme que la table mensuelle importée est correctement ordonnée et couvre l'ensemble de la période disponible dans MySQL, de 2007 à 2021.
+
+
+
+### Statistiques descriptives
+
+Cette étape produit un résumé statistique des principales variables de la base mensuelle afin d'évaluer leur distribution avant la modélisation.
+
+```{r}
+summary(sarimax_sql)
+```
+
+
+Les statistiques descriptives confirment que les données couvrent la période allant de 2007 à 2021. La variable nb_accidents présente un minimum de 35 accidents mensuels, un maximum de 324 et une moyenne de 215,3 accidents par mois, avec une médiane de 219,5.
+
+Les variables explicatives sont exprimées sous forme de proportions. Par exemple, la proportion d'accidents de nuit (pct_nuit) varie de 0,0667 à 0,5187, avec une moyenne de 0,2365. La proportion d'accidents impliquant un piéton (pct_pieton) est en moyenne de 0,2225, tandis que celle des accidents impliquant un deux-roues motorisé (pct_moto) atteint 0,3588 en moyenne. Les autres variables (pct_meteo, pct_intersection et pct_autoroute) présentent également des valeurs comprises entre leurs minimums et maximums, ce qui décrit la variabilité des indicateurs mensuels calculés dans MySQL.
+
+### Vérification des valeurs manquantes
+
+Cette dernière vérification consiste à contrôler la présence éventuelle de valeurs manquantes dans chacune des variables de la table mensuelle.
+
+```{r}
+sapply(
+  sarimax_sql,
+  function(x) sum(is.na(x))
+)
+```
+
+Les résultats montrent que chacune des neuf variables de la table présente 0 valeur manquante. Les variables annee, mois, nb_accidents, pct_nuit, pct_meteo, pct_intersection, pct_autoroute, pct_pieton et pct_moto sont donc entièrement renseignées.
+
+Ce contrôle confirme que la table mensuelle importée ne contient aucune valeur manquante et qu'aucun traitement complémentaire n'est nécessaire avant son utilisation dans les analyses descriptives et la modélisation des séries temporelles.
+
+
+
+# Préparation des données pour le modèle SARIMAX
+
+Les données mensuelles importées depuis la base MySQL sont maintenant préparées pour la modélisation SARIMAX. Cette étape consiste à vérifier que les variables explicatives sont correctement typées et directement exploitables par les fonctions de modélisation de R. Les contrôles déjà réalisés lors de l'importation de la table mensuelle ne sont pas répétés afin d'éviter les redondances.
+
+## Préparation des variables numériques
+
+Cette étape permet de définir les variables quantitatives qui seront utilisées dans le modèle SARIMAX. Toutes les variables explicatives ainsi que la variable réponse sont ensuite converties en format numérique afin d'assurer leur compatibilité avec les méthodes d'estimation.
+
+### Variables utilisées dans le modèle
+
+```{r}
+vars_numeriques <- c(
+  "nb_accidents",
+  "pct_nuit",
+  "pct_meteo",
+  "pct_intersection",
+  "pct_autoroute",
+  "pct_pieton",
+  "pct_moto"
+)
+```
+
+La liste vars_numeriques regroupe les sept variables qui seront utilisées pour la modélisation SARIMAX. Elle comprend la variable réponse nb_accidents ainsi que les six variables explicatives pct_nuit, pct_meteo, pct_intersection, pct_autoroute, pct_pieton et pct_moto. Ces variables correspondent aux indicateurs présents dans la table mensuelle importée sous R.
+
+
+### Conversion des variables en type numérique
+
+Cette étape garantit que toutes les variables quantitatives possèdent le format attendu par les fonctions de modélisation des séries temporelles.
+
+```{r}
+sarimax_sql[vars_numeriques] <- lapply(
+  sarimax_sql[vars_numeriques],
+  as.numeric
+)
+```
+
+Le code applique la fonction as.numeric() aux sept variables définies dans vars_numeriques. Cette conversion garantit que la variable réponse ainsi que les variables explicatives sont stockées sous un format numérique compatible avec les fonctions de modélisation utilisées pour l'estimation du modèle SARIMAX.
+
+
+
+## Contrôle des variables
+
+Avant la modélisation, les variables explicatives sont contrôlées afin de vérifier leur variabilité. Une variable sans variation ne pourrait pas contribuer à expliquer les fluctuations du nombre d'accidents.
+
+### Vérification de la variabilité des variables
+
+```{r}
+sapply(
+  sarimax_sql[, vars_numeriques[-1]],
+  var,
+  na.rm = TRUE
+)
+```
+
+Les variances calculées sont toutes strictement positives. Elles sont respectivement égales à 0,0161 pour pct_nuit, 0,0081 pour pct_meteo, 0,0034 pour pct_intersection, 0,0012 pour pct_autoroute, 0,0025 pour pct_pieton et 0,0023 pour pct_moto.
+
+Ces résultats montrent qu'aucune des variables explicatives n'est constante au cours de la période étudiée. Elles présentent toutes une variabilité et peuvent donc être utilisées comme variables explicatives dans le modèle SARIMAX.
+
+
+## Validation finale des données préparées
+
+Cette dernière étape consiste à vérifier que les données préparées sont complètes et prêtes à être utilisées dans la phase de modélisation. Contrairement au chapitre précédent, seuls les contrôles indispensables à la modélisation sont conservés.
+
+
+# Analyse exploratoire de la série temporelle (EDA)
+
+Les données étant désormais préparées pour la modélisation, une analyse exploratoire de la série temporelle (Exploratory Data Analysis – EDA) est réalisée afin de caractériser le comportement du nombre mensuel d'accidents corporels. Cette étape permet d'étudier l'évolution de la série, sa distribution, sa saisonnalité, sa variabilité ainsi que sa structure de dépendance temporelle. Les résultats obtenus orienteront le choix et la spécification du modèle SARIMAX.
+
+## Construction de la série temporelle
+
+Cette étape consiste à convertir le nombre mensuel d'accidents en objet de type série temporelle (ts) afin de permettre l'utilisation des méthodes spécifiques aux séries temporelles disponibles sous R.
+
+```{r}
+accidents_ts <- ts(
+  sarimax_sql$nb_accidents,
+  start = c(2007, 1),
+  frequency = 12
+)
+```
+
+La variable nb_accidents, issue des agrégations mensuelles réalisées dans MySQL, est transformée en une série temporelle mensuelle couvrant la période de janvier 2007 à décembre 2021. Cette représentation constitue la base des analyses exploratoires et des modèles SARIMAX.
+
+
+
+## Vérification de la série temporelle
+
+Avant de réaliser les analyses graphiques, plusieurs contrôles sont effectués afin de vérifier les principales caractéristiques de la série temporelle.
+
+```{r}
+start(accidents_ts)
+
+end(accidents_ts)
+
+frequency(accidents_ts)
+
+length(accidents_ts)
+
+summary(accidents_ts)
+
+```
+
+Les résultats montrent que la série débute en janvier 2007 et se termine en décembre 2021, avec une fréquence mensuelle (12 observations par an) pour un total de 180 observations. Les statistiques descriptives indiquent un nombre mensuel d'accidents compris entre 35 et 324, avec une moyenne d'environ 215 accidents par mois. Ces caractéristiques confirment que la série est correctement construite.
+
+
+
+## Évolution de la série
+
+La représentation graphique permet d'observer l'évolution du nombre mensuel d'accidents au cours de la période d'étude et d'identifier d'éventuelles tendances ou ruptures.
+
+```{r}
+df_series <- data.frame(
+  Date = seq(
+    from = as.Date("2007-01-01"),
+    by = "month",
+    length.out = length(accidents_ts)
+  ),
+  Accidents = as.numeric(accidents_ts)
+)
+
+ggplot(
+  df_series,
+  aes(
+    x = Date,
+    y = Accidents
+  )
+) +
+  geom_line(
+    colour = "steelblue",
+    linewidth = 1
+  ) +
+  labs(
+    title = "Évolution mensuelle du nombre d'accidents corporels",
+    x = "Année",
+    y = "Nombre d'accidents"
+  ) +
+  theme_minimal()
+
+ggsave("graphics/01_evolution_mensuelle.png", width = 8, height = 5, dpi = 300)
+```
+
+Le graphique met en évidence une évolution irrégulière du nombre mensuel d'accidents corporels sur la période 2007–2021. Le nombre d'accidents oscille le plus souvent entre environ 150 et 300 accidents par mois, avec plusieurs pics dépassant ponctuellement 300 accidents, notamment autour des années 2009, 2013 et 2015.
+
+Aucune tendance générale durable à la hausse ou à la baisse n'apparaît sur l'ensemble de la période. En revanche, une baisse exceptionnelle est observée en 2020, avec un minimum d'environ 35 accidents sur un mois, nettement inférieur aux niveaux observés durant le reste de la période. Après cet épisode, la série retrouve progressivement des niveaux plus proches des années précédentes.
+
+Le graphique laisse également apparaître des fluctuations qui semblent se répéter au cours des années, suggérant la présence d'une composante saisonnière qui sera étudiée plus précisément dans les étapes suivantes.
+
+
+## Décomposition de la série
+
+La série est décomposée en ses composantes de tendance, de saisonnalité et de résidus afin de mieux comprendre sa structure.
+
+```{r}
+dec <- decompose(accidents_ts)
+
+autoplot(dec) +
+  theme_minimal() +
+  ggtitle(
+    "Décomposition de la série mensuelle des accidents corporels"
+  )
+
+ggsave("graphics/02_decomposition.png", width = 8, height = 5, dpi = 300)
+```
+
+La décomposition met en évidence les différentes composantes de la série temporelle.
+
+La composante de tendance montre une légère diminution entre 2007 et 2011, suivie d'une hausse progressive jusqu'aux environs de 2016, avant une nouvelle baisse à partir de 2017. Cette diminution devient particulièrement marquée en 2020, puis la tendance remonte progressivement en fin de période.
+
+La composante saisonnière présente un profil relativement stable d'une année à l'autre. Les mêmes variations mensuelles se répètent régulièrement, ce qui confirme l'existence d'une saisonnalité récurrente dans le nombre d'accidents corporels.
+
+Enfin, les résidus sont globalement centrés autour de zéro, mais présentent des fluctuations plus importantes durant l'année 2020, traduisant un événement exceptionnel qui n'est pas entièrement expliqué par les composantes de tendance et de saisonnalité.
+
+Cette décomposition confirme que la série comporte à la fois une composante saisonnière et une évolution de long terme, ce qui justifie l'utilisation d'un modèle SARIMAX intégrant une saisonnalité.
+
+
+## Distribution de la variable cible
+
+Cette étape permet d'étudier la distribution du nombre mensuel d'accidents afin d'apprécier sa forme générale et sa dispersion.
+
+```{r}
+df_hist <- data.frame(
+  accidents = as.numeric(accidents_ts)
+)
+
+ggplot(
+  df_hist,
+  aes(
+    x = accidents,
+    y = after_stat(density)
+  )
+) +
+  geom_histogram(
+    bins = 12,
+    fill = "lightgray",
+    colour = "black"
+  ) +
+  geom_density(
+    fill = "gold",
+    alpha = 0.30
+  ) +
+  geom_vline(
+    xintercept = mean(df_hist$accidents),
+    colour = "blue",
+    linetype = "dashed",
+    linewidth = 1
+  ) +
+  labs(
+    title = "Distribution du nombre mensuel d'accidents",
+    x = "Nombre d'accidents",
+    y = "Densité"
+  ) +
+  theme_minimal()
+
+ggsave("graphics/03_distribution_de_la_variable_cible.png", width = 8, height = 5, dpi = 300)
+```
+
+L'histogramme montre que le nombre mensuel d'accidents est principalement concentré autour de 200 à 250 accidents par mois, avec une moyenne représentée par la ligne verticale située à environ 215 accidents.
+
+La distribution est unimodale et globalement centrée autour de cette moyenne. Elle présente toutefois une légère asymétrie vers les faibles valeurs, liée à quelques mois ayant enregistré un nombre d'accidents particulièrement faible, notamment durant l'année 2020.
+
+Dans l'ensemble, la distribution reste relativement régulière malgré la présence de quelques observations extrêmes.
+
+
+## Boxplot de la variable cible
+
+Le diagramme en boîte permet de visualiser la dispersion des observations ainsi que la présence éventuelle de valeurs atypiques.
+
+```{r}
+ggplot(
+  data.frame(
+    accidents = as.numeric(accidents_ts)
+  ),
+  aes(y = accidents)
+) +
+  geom_boxplot(
+    fill = "lightgreen"
+  ) +
+  labs(
+    title = "Boxplot du nombre mensuel d'accidents",
+    x = NULL,
+    y = "Nombre d'accidents"
+  ) +
+  theme_minimal()
+
+
+ggsave("graphics/04_boxplot_de_la_Variable_cible.png", width = 8, height = 5, dpi = 300)
+```
+
+Le diagramme en boîte montre que la moitié des observations est comprise approximativement entre 190 et 245 accidents par mois, avec une médiane proche de 220 accidents.
+
+Le boxplot met également en évidence une observation atypique située autour de 35 accidents, nettement inférieure au reste des observations. Cette valeur correspond au minimum observé dans la série et est cohérente avec la forte baisse des accidents enregistrée durant l'année 2020.
+
+En dehors de cette observation isolée, la dispersion de la série reste relativement homogène et ne révèle pas d'anomalies majeures susceptibles de compromettre la modélisation.
+
+
+
+## Statistiques descriptives
+
+Les principales statistiques descriptives sont calculées afin de résumer la tendance centrale et la variabilité de la série.
+
+```{r}
+cat("\n=====================\n")
+cat("ACCIDENTS CORPORELS\n")
+cat("=====================\n")
+
+summary(accidents_ts)
+
+cat(
+  "\nVariance :",
+  round(var(accidents_ts), 2)
+)
+
+cat(
+  "\nÉcart-type :",
+  round(sd(accidents_ts), 2),
+  "\n"
+)
+```
+
+Les statistiques descriptives montrent que le nombre mensuel d'accidents varie entre 35 et 324, avec une moyenne de 215,3 accidents et une médiane de 219,5 accidents, ce qui indique que la majorité des observations est concentrée autour de cette valeur centrale.
+
+L'écart-type est de 44,62 accidents et la variance atteint 1 990,90, traduisant une variabilité non négligeable du nombre d'accidents d'un mois à l'autre.
+
+Les premier et troisième quartiles, respectivement égaux à 192 et 246 accidents, montrent que la moitié des observations est comprise dans cet intervalle.
+
+Ces résultats confirment que la série présente une variabilité suffisante pour justifier une modélisation temporelle.
+
+
+
+## Distribution mensuelle
+
+La distribution du nombre d'accidents est étudiée selon les mois de l'année afin de mettre en évidence une éventuelle saisonnalité.
+
+```{r}
+df_ts <- data.frame(
+  Date = seq(
+    from = as.Date("2007-01-01"),
+    by = "month",
+    length.out = length(accidents_ts)
+  ),
+  Accidents = as.numeric(accidents_ts)
+)
+
+df_ts$Mois <- factor(
+  format(df_ts$Date, "%m"),
+  levels = sprintf("%02d", 1:12)
+)
+
+ggplot(
+  df_ts,
+  aes(
+    x = Mois,
+    y = Accidents
+  )
+) +
+  geom_boxplot(
+    fill = "lightblue"
+  ) +
+  labs(
+    title = "Distribution mensuelle des accidents corporels",
+    x = "Mois",
+    y = "Nombre d'accidents"
+  ) +
+  theme_minimal()
+
+ggsave("graphics/05_distribution_mensuelle.png", width = 8, height = 5, dpi = 300)
+```
+
+Les boxplots mensuels mettent en évidence des différences selon les mois de l'année.
+
+Les médianes sont généralement plus faibles en août, où le nombre mensuel d'accidents est le plus bas parmi les douze mois. À l'inverse, les mois de juin, septembre, octobre et novembre présentent des médianes plus élevées, traduisant un nombre d'accidents généralement supérieur durant ces périodes.
+
+La dispersion varie également selon les mois. Certains mois, comme juin et octobre, présentent une variabilité plus importante, tandis que août affiche une distribution plus resserrée.
+
+Quelques valeurs atypiques apparaissent également pour certains mois, notamment avril, novembre et décembre, correspondant à des mois où le nombre d'accidents a été exceptionnellement faible.
+
+Dans l'ensemble, ces différences entre les distributions mensuelles confirment l'existence d'une saisonnalité dans la série temporelle, ce qui justifie l'intégration d'une composante saisonnière dans le modèle SARIMAX.
+
+
+
+## Lag plots
+
+Les graphiques de retard permettent d'examiner les relations entre une observation et ses valeurs passées afin d'identifier une éventuelle dépendance temporelle.
+
+```{r}
+gglagplot(
+  accidents_ts,
+  lags = 12,
+  do.lines = FALSE
+) +
+  ggtitle("Lag plots de la série des accidents")
+```
+
+Les graphiques de retard mettent en évidence une relation positive entre les observations pour plusieurs retards, en particulier pour les retards les plus élevés, où les nuages de points présentent une orientation croissante. Cette relation reste toutefois modérée, les observations demeurant relativement dispersées autour de la diagonale.
+
+Les retards proches de 12 mois montrent une association plus marquée, ce qui suggère que le nombre d'accidents observé un mois donné est partiellement lié à celui enregistré au même mois de l'année précédente. Ces résultats mettent en évidence une dépendance temporelle compatible avec l'utilisation d'un modèle autorégressif comportant une composante saisonnière.
+
+
+
+## Graphique de saisonnalité par année
+
+Afin de visualiser la reproductibilité de la composante saisonnière d'une année sur l'autre, une superposition des profils mensuels est réalisée.
+
+
+```{r}
+ggseasonplot(
+  accidents_ts, 
+  year.labels = FALSE,
+  continuous = FALSE
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  labs(
+    title = "Comparaison des mois des différentes années",
+    x = "Mois",
+    y = "Nombre d'accidents",
+    colour = "Année"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    axis.title = element_text(face = "bold")
+  )
+
+ggsave("graphics/06_Comparaison_interannuelle.png", width = 8, height = 5, dpi = 300)
+``` 
+  
+La superposition des chroniques mensuelles met en évidence une régularité intra-annuelle stricte du nombre d'accidents sur la période historique. Deux dynamiques saisonnières majeures se répètent chaque année : un creux d'activité systématique et prononcé au mois d'août (coïncidant avec la baisse du trafic estival en milieu urbain), suivi d'un pic de sinistralité majeur à l'automne, particulièrement en octobre. Les trajectoires annuelles restent globalement resserrées dans un couloir allant de 150 à 300 accidents par mois, confirmant la stabilité de la saisonnalité avant la rupture structurelle observée lors de la crise sanitaire de 2020.
+
+
+
+## Graphique mensuel
+
+Le graphique mensuel compare les observations d'un même mois sur plusieurs années afin d'évaluer la stabilité de la saisonnalité.
+
+```{r}
+ggmonthplot(accidents_ts) +
+  ggtitle("Month plot des accidents corporels")
+
+```
+
+Le graphique mensuel met en évidence des différences entre les mois de l'année. Les niveaux moyens sont généralement plus faibles en août, tandis qu'ils sont plus élevés entre juin et octobre, avec un maximum observé en octobre.
+
+Une variabilité importante est également visible à l'intérieur de certains mois, notamment en avril, juin et octobre, où plusieurs observations s'écartent sensiblement de la moyenne mensuelle. La forte baisse observée en avril 2020 apparaît clairement comme une valeur atypique.
+
+Dans l'ensemble, ce graphique confirme que les niveaux d'accidents varient selon les mois de l'année, ce qui renforce l'hypothèse d'une composante saisonnière dans la série.
+
+
+
+## Analyse des fonctions d'autocorrélation
+
+### Fonction d'autocorrélation (ACF)
+
+La fonction d'autocorrélation permet de mesurer la dépendance entre les observations séparées par différents retards et constitue une étape essentielle pour l'identification du modèle SARIMA.
+
+```{r}
+ggAcf(accidents_ts) +
+  ggtitle("Fonction d'autocorrélation (ACF)")
+```
+
+La fonction d'autocorrélation met en évidence plusieurs coefficients significatifs dépassant les bornes de confiance, notamment aux retards 1, 6, 11, 12, 14, 22 et 24 mois.
+
+Les pics observés aux retards 12 et 24 mois sont particulièrement marqués, traduisant une forte dépendance annuelle dans la série. Cette structure confirme l'existence d'une saisonnalité de période 12 mois ainsi qu'une dépendance temporelle persistante entre les observations.
+
+Ces résultats justifient l'utilisation d'un modèle SARIMAX intégrant des composantes autorégressives et saisonnières.
+
+
+
+### Fonction d'autocorrélation partielle (PACF)
+
+La fonction d'autocorrélation partielle permet d'identifier les retards présentant une influence directe sur la série après prise en compte des dépendances intermédiaires.
+
+```{r}
+ggPacf(accidents_ts) +
+  ggtitle("Fonction d'autocorrélation partielle (PACF)")
+```
+
+La fonction d'autocorrélation partielle présente plusieurs pics significatifs, notamment aux retards 1, 2, 6, 10, 11, 12, 13, 14, 22 et 24 mois.
+
+Le pic observé au retard 12 est particulièrement important, ce qui confirme l'influence de la composante saisonnière annuelle déjà mise en évidence par l'ACF. Les autres retards significatifs traduisent également l'existence d'une dépendance directe entre certaines observations successives.
+
+L'analyse conjointe de l'ACF et de la PACF fournit ainsi des indications utiles pour le choix des ordres autorégressifs et saisonniers du modèle SARIMAX.
+
+
+
+# Analyse exploratoire des variables exogènes
+
+Cette étape vise à analyser les variables exogènes susceptibles d'améliorer la qualité des prévisions du modèle SARIMAX. L'objectif est d'étudier leur évolution temporelle, leur distribution, leurs relations mutuelles ainsi que leur niveau de corrélation afin de vérifier leur pertinence avant leur intégration dans le modèle.
+
+## Sélection des variables exogènes
+
+Les variables explicatives retenues sont :
+
+```{r}
+vars_exogenes <- c(
+  "pct_nuit",
+  "pct_meteo",
+  "pct_intersection",
+  "pct_autoroute",
+  "pct_pieton",
+  "pct_moto"
+)
+```
+
+Ces variables décrivent les principales caractéristiques mensuelles des accidents et seront utilisées comme variables exogènes du modèle SARIMAX.
+
+
+
+## Création des matrices d'apprentissage et de test
+
+Afin d'évaluer les performances prédictives du modèle, les données sont séparées en un jeu d'apprentissage (2007–2019) et un jeu de test (2020–2021).
+
+```{r}
+xreg_train <- sarimax_sql %>%
+  filter(annee < 2020) %>%
+  select(all_of(vars_exogenes)) %>%
+  as.matrix()
+
+xreg_test <- sarimax_sql %>%
+  filter(annee >= 2020) %>%
+  select(all_of(vars_exogenes)) %>%
+  as.matrix()
+
+# Standardisation des variables exogènes
+
+xreg_train_scaled <- scale(xreg_train)
+
+xreg_test_scaled <- scale(
+  xreg_test,
+  center = attr(xreg_train_scaled, "scaled:center"),
+  scale  = attr(xreg_train_scaled, "scaled:scale")
+)
+
+```
+
+## Contrôle de cohérence des données
+
+Les dimensions, la structure et la cohérence des matrices sont vérifiées afin de s'assurer que les données sont correctement préparées pour la modélisation.
+
+Les dimensions obtenues sont les suivantes :
+
+```{r}
+dim(xreg_train)
+dim(xreg_test)
+```
+
+Le jeu d'apprentissage comporte 156 observations mensuelles, tandis que le jeu de test en contient 24, ce qui correspond aux deux dernières années de la période d'étude.
+
+
+
+### Valeurs manquantes
+
+```{r}
+colSums(is.na(xreg_train))
+colSums(is.na(xreg_test))
+```
+
+### Variances
+
+```{r}
+apply(
+  xreg_train,
+  2,
+  var,
+  na.rm = TRUE
+)
+```
+
+### Analyse des corrélations entre variables exogènes
+
+Avant la modélisation, il est nécessaire d'examiner les relations existant entre les variables explicatives afin d'identifier d'éventuelles dépendances importantes.
+
+```{r}
+round(
+  cor(
+    xreg_train,
+    use = "complete.obs"
+  ),
+  3
+)
+```
+
+Les résultats montrent notamment :
+
+une corrélation relativement forte entre la proportion d'accidents de nuit et les conditions météorologiques défavorables (≈ 0,70) ;
+une corrélation négative entre les intersections et les accidents sur autoroute (≈ -0,62), traduisant leur caractère complémentaire ;
+des corrélations modérées ou faibles entre les autres variables.
+
+Dans l'ensemble, aucune corrélation n'apparaît suffisamment élevée pour justifier la suppression immédiate d'une variable.
+
+
+
+## Evolution temporelle des variables exogènes
+
+L'évolution des variables exogènes est représentée afin d'identifier d'éventuelles tendances ou ruptures au cours de la période d'étude.
+
+```{r}
+df_time <- sarimax_sql %>%
+  select(all_of(vars_exogenes)) %>%
+  mutate(
+    date = seq(
+      from = as.Date("2007-01-01"),
+      by = "month",
+      length.out = n()
+    )
+  ) %>%
+  pivot_longer(
+    cols = all_of(vars_exogenes),
+    names_to = "variable",
+    values_to = "valeur"
+  )
+
+ggplot(
+  df_time,
+  aes(
+    x = date,
+    y = valeur
+  )
+) +
+  geom_line(
+    colour = "steelblue",
+    linewidth = 0.8
+  ) +
+  facet_wrap(
+    ~ variable,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  labs(
+    title = "Evolution temporelle des variables exogènes",
+    x = "Année",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+Les graphiques montrent que les variables exogènes n'évoluent pas toutes de la même manière au cours de la période d'étude.
+
+La proportion d'accidents sur autoroute (pct_autoroute) présente une tendance globale à la hausse, passant d'environ 0,06–0,08 au début de la période à des valeurs proches de 0,15–0,18 en fin de période, malgré des fluctuations mensuelles.
+
+À l'inverse, la proportion d'accidents survenant en intersection (pct_intersection) montre une tendance progressive à la baisse, avec des valeurs proches de 0,50 au début de la série qui diminuent progressivement vers environ 0,35–0,40 à partir de 2020.
+
+La variable pct_meteo, représentant la proportion d'accidents survenus sous des conditions météorologiques défavorables, présente d'importantes fluctuations d'un mois à l'autre, sans tendance de fond clairement identifiable.
+
+La proportion d'accidents impliquant un deux-roues motorisé (pct_moto) oscille autour de 35 % sur l'ensemble de la période. Après une légère hausse jusqu'en 2018 environ, une diminution est observable au cours des dernières années.
+
+La proportion d'accidents de nuit (pct_nuit) présente une forte saisonnalité, avec un cycle annuel très régulier marqué par des pics et des creux qui se répètent chaque année. Cette structure confirme le caractère saisonnier déjà observé lors de l'analyse de la série des accidents.
+
+Enfin, la proportion d'accidents impliquant au moins un piéton (pct_pieton) fluctue autour de 20 à 25 %, sans tendance marquée sur l'ensemble de la période, bien que quelques variations ponctuelles apparaissent selon les années.
+
+Dans l'ensemble, ces résultats montrent que les variables exogènes présentent des comportements temporels variés : certaines évoluent progressivement au cours du temps (pct_autoroute et pct_intersection), d'autres sont principalement caractérisées par des fluctuations mensuelles (pct_meteo, pct_pieton et pct_moto), tandis que pct_nuit présente une saisonnalité particulièrement marquée. Ces caractéristiques justifient leur prise en compte comme variables explicatives dans le modèle SARIMAX.
+
+
+
+## Distribution des variables exogènes
+
+La distribution de chaque variable est examinée afin d'évaluer leur dispersion et d'identifier d'éventuelles valeurs atypiques.
+
+```{r}
+df_exogenes <- sarimax_sql %>%
+  select(all_of(vars_exogenes)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "valeur"
+  )
+```
+
+Histogrammes 
+
+```{r}
+ggplot(
+  df_exogenes,
+  aes(x = valeur)
+) +
+  geom_histogram(
+    bins = 20,
+    fill = "lightblue",
+    color = "black"
+  ) +
+  facet_wrap(
+    ~ variable,
+    scales = "free",
+    ncol = 3
+  ) +
+  labs(
+    title = "Distribution des variables exogènes",
+    x = NULL,
+    y = "Effectif"
+  ) +
+  theme_minimal()
+```
+
+Boxplots
+
+```{r}
+ggplot(
+  df_exogenes,
+  aes(
+    x = variable,
+    y = valeur
+  )
+) +
+  geom_boxplot(
+    fill = "lightgreen"
+  ) +
+  facet_wrap(
+    ~ variable,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  labs(
+    title = "Boxplots des variables exogènes",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+```
+
+Les distributions des différentes variables exogènes présentent des profils variés. Les variables pct_autoroute, pct_intersection, pct_moto et pct_pieton sont globalement unimodales et relativement concentrées autour de leur moyenne. La variable pct_meteo est davantage dispersée, avec une légère asymétrie vers les valeurs élevées, tandis que pct_nuit présente une distribution plus étalée, reflétant les importantes variations saisonnières observées précédemment.
+
+Les boxplots confirment cette dispersion. Quelques valeurs atypiques apparaissent pour certaines variables, notamment pct_intersection, pct_moto et pct_pieton, mais leur nombre reste limité. La variable pct_nuit présente la plus forte variabilité interquartile, ce qui est cohérent avec son comportement fortement saisonnier. Dans l'ensemble, aucune valeur extrême ne semble suffisamment importante pour justifier un traitement particulier avant la modélisation.
+
+
+## Analyse des corrélations
+
+Matrice de corrélations
+
+La matrice de corrélations permet d'évaluer les relations linéaires entre les variables exogènes et d'identifier d'éventuelles dépendances importantes.
+
+```{r}
+correlations <- cor(
+  sarimax_sql[, c(
+    "nb_accidents",
+    vars_exogenes
+  )],
+  use = "complete.obs"
+)
+
+round(correlations, 3)
+```
+
+Afin de faciliter l'interprétation, la matrice est représentée sous forme de carte thermique.
+
+```{r}
+cor_df <- reshape2::melt(correlations)
+
+ggplot(
+  cor_df,
+  aes(
+    x = Var1,
+    y = Var2,
+    fill = value
+  )
+) +
+  geom_tile() +
+  geom_text(
+    aes(label = round(value, 2)),
+    size = 4
+  ) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  labs(
+    title = "Matrice de corrélations",
+    fill = "Corr."
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+
+ggsave("graphics/07_Matrice_de_corrélations.png", width = 8, height = 5, dpi = 300)
+```
+
+Les corrélations entre le nombre mensuel d'accidents et les variables exogènes restent globalement faibles à modérées.
+
+La relation la plus élevée avec la variable cible est observée pour pct_moto (r = 0,388), suivie de pct_pieton (r = 0,265). À l'inverse, pct_autoroute présente une très faible corrélation négative avec le nombre d'accidents (r = -0,041), tandis que pct_nuit, pct_meteo et pct_intersection sont très faiblement corrélées à la variable réponse.
+
+Entre variables explicatives, plusieurs relations plus marquées apparaissent. La proportion d'accidents de nuit (pct_nuit) est fortement corrélée à la proportion d'accidents survenus sous des conditions météorologiques défavorables (pct_meteo) (r = 0,701). Une corrélation négative relativement importante est également observée entre pct_intersection et pct_autoroute (r = -0,618), ce qui traduit le caractère complémentaire de ces deux types de localisation. Les autres corrélations demeurent faibles à modérées.
+
+Dans l'ensemble, la matrice met en évidence des relations cohérentes entre certaines variables explicatives, sans révéler de dépendances suffisamment fortes pour remettre en cause leur utilisation simultanée dans le modèle SARIMAX.
+
+
+
+### Vérification de la multicolinéarité
+
+La présence d'une éventuelle multicolinéarité est évaluée à l'aide du facteur d'inflation de variance (VIF).
+
+```{r}
+vif_modele <- lm(
+  nb_accidents ~ .,
+  data = cbind(
+    nb_accidents = sarimax_sql$nb_accidents,
+    sarimax_sql[, vars_exogenes]
+  )
+)
+
+vif_resultats <- car::vif(vif_modele)
+
+round(vif_resultats, 2)
+
+max(vif_resultats)
+```
+
+Les facteurs d'inflation de variance (VIF) sont compris entre 1,07 (pct_moto) et 2,39 (pct_nuit). Toutes les valeurs restent largement inférieures aux seuils généralement retenus pour caractériser une multicolinéarité problématique (5 ou 10).
+
+Ces résultats indiquent que les corrélations observées entre certaines variables explicatives, notamment entre pct_nuit et pct_meteo, ne sont pas suffisamment importantes pour entraîner une instabilité des estimations du modèle. Les variables exogènes peuvent donc être conservées simultanément dans le modèle SARIMAX sans risque de multicolinéarité préoccupante.
+
+
+# Analyse de la stationnarité
+
+Avant l'estimation d'un modèle SARIMAX, il est nécessaire de vérifier que la série temporelle satisfait l'hypothèse de stationnarité. Cette propriété garantit que les caractéristiques statistiques de la série demeurent stables au cours du temps et conditionne la validité des modèles ARIMA. L'analyse repose à la fois sur une inspection graphique et sur des tests statistiques complémentaires.
+
+## Représentation graphique
+
+Une première évaluation est réalisée à partir de la représentation graphique de la série temporelle.
+
+```{r}
+autoplot(accidents_ts) +
+  labs(
+    title = "Série mensuelle des accidents corporels",
+    x = "Année",
+    y = "Nombre d'accidents"
+  ) +
+  theme_minimal()
+```
+
+La représentation graphique montre que le nombre mensuel d'accidents fluctue fortement tout au long de la période d'étude. La série oscille généralement entre 150 et 300 accidents par mois, avec plusieurs pics et creux marqués. Une baisse particulièrement importante est observée en 2020, où le nombre d'accidents chute exceptionnellement à environ 35 accidents sur un mois avant de remonter progressivement.
+
+La série ne présente pas de tendance linéaire clairement marquée sur l'ensemble de la période, mais les fluctuations observées ainsi que les variations récurrentes entre les mois suggèrent la présence d'une composante saisonnière déjà mise en évidence lors de l'analyse exploratoire. L'évaluation visuelle ne permet toutefois pas de conclure à la stationnarité de la série, ce qui justifie le recours à des tests statistiques.
+
+
+
+## Test de Dickey-Fuller augmenté (ADF)
+
+Le test de Dickey-Fuller augmenté (ADF) permet d'évaluer l'hypothèse nulle de présence d'une racine unitaire, correspondant à une série non stationnaire.
+
+```{r}
+adf.test(accidents_ts)
+```
+
+Le test de Dickey-Fuller augmenté fournit une statistique de test de −4,079 avec une p-value inférieure à 0,01. L'hypothèse nulle de présence d'une racine unitaire est donc rejetée au seuil de 5 %.
+
+Ces résultats indiquent que la série peut être considérée comme stationnaire selon le test ADF. Autrement dit, aucune preuve statistique ne permet de conclure à l'existence d'une racine unitaire dans la série du nombre mensuel d'accidents.
+
+
+
+## Test KPSS
+
+Le test KPSS est utilisé en complément du test ADF. Contrairement à ce dernier, son hypothèse nulle correspond à une série stationnaire.
+
+```{r}
+kpss.test(accidents_ts)
+```
+
+Le test KPSS fournit une statistique de 0,559 avec une p-value de 0,028, inférieure au seuil de 5 %. L'hypothèse nulle de stationnarité est donc rejetée.
+
+Contrairement au test ADF, le test KPSS suggère que la série présente une légère non-stationnarité. Les deux tests conduisent ainsi à des conclusions différentes, ce qui est fréquent lorsque la série présente simultanément une saisonnalité marquée, des fluctuations importantes ou une rupture ponctuelle, comme celle observée en 2020.
+
+Compte tenu de ces résultats, il est prudent d'envisager une différenciation lors de la construction du modèle SARIMAX afin de garantir la stationnarité de la série.
+
+
+
+## Détermination du nombre de différenciations
+
+Le nombre de différenciations ordinaires et saisonnières nécessaires est estimé automatiquement.
+
+```{r}
+cat("Nombre de différenciations ordinaires :", ndiffs(accidents_ts), "\n")
+
+cat("Nombre de différenciations saisonnières :", nsdiffs(accidents_ts), "\n")
+```
+
+Les fonctions automatiques recommandent une différenciation ordinaire (d = 1) et une différenciation saisonnière (D = 1).
+
+Ces recommandations sont cohérentes avec les résultats des tests de stationnarité. Bien que le test ADF indique une série stationnaire, le test KPSS met en évidence une légère non-stationnarité, tandis que l'analyse exploratoire a montré l'existence d'une composante saisonnière marquée. L'application d'une différenciation ordinaire et d'une différenciation saisonnière permettra ainsi d'obtenir une série plus conforme aux hypothèses des modèles SARIMAX tout en conservant l'information utile à la prévision.
+
+
+
+# Construction et sélection des modèles SARIMA
+
+Après avoir vérifié la stationnarité de la série et analysé les fonctions d'autocorrélation (ACF) et d'autocorrélation partielle (PACF), plusieurs modèles SARIMA sont estimés afin d'identifier la spécification la plus adaptée. L'identification initiale repose sur les résultats de l'analyse exploratoire (section 6.11), puis différents modèles sont comparés selon leur qualité d'ajustement, leurs diagnostics résiduels et leurs performances de prévision.
+
+
+
+## Constitution des jeux d'apprentissage et de test
+
+La série temporelle est divisée en deux périodes :
+
+un échantillon d'apprentissage couvrant la période de janvier 2007 à décembre 2019, utilisé pour estimer les modèles ;
+un échantillon de test couvrant la période de janvier 2020 à décembre 2021, réservé à l'évaluation des performances prédictives.
+
+Les variables exogènes sont découpées selon la même période afin de garantir leur cohérence avec la variable cible.
+
+```{r}
+accidents_train <- window(
+  accidents_ts,
+  end = c(2019, 12)
+)
+
+accidents_test <- window(
+  accidents_ts,
+  start = c(2020, 1)
+)
+```
+
+## Identification automatique d'un modèle de référence
+
+Une première identification est réalisée à l'aide de la fonction auto.arima(), qui recherche automatiquement la combinaison de paramètres minimisant les critères d'information.
+
+```{r}
+modele_sarima_auto <- auto.arima(
+  accidents_train,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE,
+)
+
+arimaorder(modele_sarima_auto)
+```
+
+Une première identification est réalisée à l'aide de la fonction auto.arima(), qui recherche automatiquement la combinaison de paramètres minimisant le critère d'information AIC. Le modèle retenu est SARIMA(1,0,1)(2,1,0)12
+	​
+Cette spécification constitue un point de départ pour la construction et la comparaison d'autres modèles candidats. Les ordres proposés sont cohérents avec les dépendances temporelles et la saisonnalité observées lors de l'analyse exploratoire.
+
+Bien que auto.arima() propose le modèle SARIMA(1,0,1)(2,1,0)12, plusieurs spécifications voisines ont été estimées afin d'évaluer si une structure alternative pouvait offrir de meilleures performances en termes d'ajustement, de diagnostic des résidus et de prévision sur l'échantillon de test.
+
+
+
+## Estimation du modèle de référence
+
+À partir de cette première identification et des résultats de l'analyse exploratoire, un premier modèle SARIMA(2,0,1)(0,1,2)12 est estimé afin de servir de modèle de référence pour les comparaisons ultérieures.
+
+```{r}
+modele_sarima <- Arima(
+  accidents_train,
+  order = c(2,0,1),
+  seasonal = list(
+    order = c(0,1,2),
+    period = 12
+  )
+)
+```
+
+## Diagnostic des résidus
+
+Les résidus du modèle sont analysés afin de vérifier qu'ils se comportent comme un bruit blanc, condition nécessaire à la validité du modèle.
+
+Les diagnostics reposent notamment sur :
+
+le test de Ljung-Box, qui vérifie l'absence d'autocorrélation résiduelle ;
+le test de Jarque-Bera, qui évalue la normalité des résidus ;
+l'examen graphique des fonctions ACF et PACF des résidus.
+
+```{r}
+checkresiduals(modele_sarima)
+
+Box.test(
+  residuals(modele_sarima),
+  lag = 24,
+  fitdf = length(coef(modele_sarima)),
+  type = "Ljung-Box"
+)
+
+jarque.bera.test(
+  residuals(modele_sarima)
+)
+```
+
+Les diagnostics montrent que les résidus sont globalement centrés autour de zéro et présentent une variance relativement stable au cours du temps. L'histogramme suggère une distribution proche de la normalité, ce qui est confirmé par le test de Jarque–Bera (p=0,080), qui ne permet pas de rejeter l'hypothèse de normalité des résidus au seuil de 5 %.
+
+En revanche, le test de Ljung–Box est significatif (p=0,0045), indiquant la présence d'une autocorrélation résiduelle. Cette observation est également visible sur l'ACF des résidus, où quelques pics dépassent les bandes de confiance, notamment autour de certains retards saisonniers. Les résidus ne constituent donc pas un bruit blanc parfait, ce qui suggère que le modèle SARIMA(2,0,1)(0,1,2)12 ne capture pas entièrement la structure de dépendance de la série. Cette constatation justifie la comparaison avec d'autres spécifications.
+
+
+
+## Comparaison des modèles candidats
+
+Plusieurs spécifications du modèle SARIMA sont ensuite estimées afin d'identifier la structure offrant le meilleur compromis entre qualité d'ajustement et parcimonie
+
+```{r}
+mod1 <- Arima(
+  accidents_train,
+  order = c(1,0,1),
+  seasonal = list(order = c(0,1,2), period = 12)
+)
+
+mod2 <- Arima(
+  accidents_train,
+  order = c(2,0,2),
+  seasonal = list(order = c(0,1,2), period = 12)
+)
+
+mod3 <- Arima(
+  accidents_train,
+  order = c(2,0,1),
+  seasonal = list(order = c(1,1,2), period = 12)
+)
+
+mod4 <- Arima(
+  accidents_train,
+  order = c(2,0,1),
+  seasonal = list(order = c(0,1,1), period = 12)
+)
+```
+
+Les différents modèles sont comparés à l'aide du critère d'information d'Akaike (AIC), qui permet d'évaluer le compromis entre qualité d'ajustement et parcimonie. Plus la valeur de l'AIC est faible, meilleur est le modèle.
+
+```{r}
+library(knitr)
+
+comparaison_aic <- data.frame(
+  Modèle = c(
+    "SARIMA(2,0,1)(0,1,2)",
+    "SARIMA(1,0,1)(0,1,2)",
+    "SARIMA(2,0,2)(0,1,2)",
+    "SARIMA(2,0,1)(1,1,2)",
+    "SARIMA(2,0,1)(0,1,1)"
+  ),
+  AIC = round(c(
+    AIC(modele_sarima),
+    AIC(mod1),
+    AIC(mod2),
+    AIC(mod3),
+    AIC(mod4)
+  ),2)
+)
+
+kable(
+  comparaison_aic,
+  caption = "Comparaison des modèles SARIMA selon le critère AIC",
+  align = c("l","c")
+)
+```
+
+Les résultats montrent que 
+le modèle SARIMA(1,0,1)(0,1,2)12 obtient la valeur d'AIC la plus faible (1351,19), ce qui en fait le meilleur modèle selon ce critère. 
+
+Le modèle SARIMA(2,0,1)(0,1,1)12 présente un AIC très proche (1351,29), tandis que le modèle de référence SARIMA(2,0,1)(0,1,2)12 est légèrement moins performant (1352,99). À l'inverse, les modèles SARIMA(2,0,2)(0,1,2)12 et SARIMA(2,0,1)(1,1,2)12 affichent des valeurs d'AIC plus élevées et apparaissent donc moins adaptés aux données.
+
+
+
+## Validation sur l'échantillon test
+
+Les trois modèles les plus performants selon le critère AIC ont ensuite été évalués sur l'échantillon de test (2020–2021) à l'aide des indicateurs RMSE, MAE et MAPE.
+
+```{r}
+pred_sarima <- forecast(
+  modele_sarima,
+  h = length(accidents_test)
+)
+
+pred_mod1 <- forecast(
+  mod1,
+  h = length(accidents_test)
+)
+
+pred_mod4 <- forecast(
+  mod4,
+  h = length(accidents_test)
+)
+
+perf <- rbind(
+  "SARIMA(2,0,1)(0,1,2)" =
+    accuracy(pred_sarima, accidents_test)[2,],
+
+  "SARIMA(1,0,1)(0,1,2)" =
+    accuracy(pred_mod1, accidents_test)[2,],
+
+  "SARIMA(2,0,1)(0,1,1)" =
+    accuracy(pred_mod4, accidents_test)[2,]
+)
+
+comparaison_test <- data.frame(
+  Modèle = rownames(perf),
+  RMSE = round(perf[, "RMSE"], 2),
+  MAE  = round(perf[, "MAE"], 2),
+  MAPE = round(perf[, "MAPE"], 2)
+)
+
+kable(
+  comparaison_test,
+  caption = "Performances des modèles sur l'échantillon de test",
+  align = c("l","c","c","c")
+)
+```
+
+Les performances prédictives des trois modèles sont très proches. Le modèle SARIMA(2,0,1)(0,1,2)12 obtient le RMSE le plus faible (53,21) ainsi que le MAE le plus faible (35,72) et le MAPE le plus faible (38,70 %). Les écarts avec les deux autres modèles restent toutefois très faibles (moins de 0,3 unité sur le RMSE et moins de 0,2 % sur le MAPE), ce qui indique que leurs capacités de prévision sont quasiment équivalentes. 
+
+Dans la suite de l'étude, le modèle SARIMA(2,0,1)(0,1,2)12 est retenu comme modèle de référence, en raison de ses performances légèrement supérieures sur les données de test.
+
+
+
+# Construction des modèles SARIMAX
+
+Afin d'identifier les variables exogènes les plus pertinentes, toutes les combinaisons possibles des variables explicatives sont d'abord évaluées sur le modèle SARIMA de référence. Les combinaisons les plus prometteuses sont ensuite réestimées sur plusieurs structures SARIMA candidates afin d'identifier la spécification SARIMAX offrant les meilleures performances d'ajustement et de prévision.
+
+## Recherche des variables exogènes
+
+Afin d'identifier les variables exogènes les plus pertinentes, toutes les combinaisons possibles des variables explicatives sont évaluées. Chaque combinaison est intégrée au modèle SARIMA de référence, puis les modèles obtenus sont comparés à partir du critère d'information d'Akaike (AIC) et du RMSE calculé sur l'échantillon de test.
+
+```{r}
+vars <- colnames(xreg_train_scaled)
+
+results <- data.frame()
+
+for(k in 1:length(vars)){
+  
+  combs <- combn(
+    vars,
+    k,
+    simplify = FALSE
+  )
+  
+  for(v in combs){
+    
+    fit <- try(
+      Arima(
+        accidents_train,
+        order = c(2,0,1),
+        seasonal = list(
+          order = c(0,1,2),
+          period = 12
+        ),
+        xreg = xreg_train_scaled[
+          ,
+          v,
+          drop = FALSE
+        ]
+      ),
+      silent = TRUE
+    )
+    
+    if(!inherits(fit,"try-error")){
+      
+      pred <- forecast(
+        fit,
+        h = length(accidents_test),
+        xreg = xreg_test_scaled[
+          ,
+          v,
+          drop = FALSE
+        ]
+      )
+      
+      results <- rbind(
+        results,
+        data.frame(
+          variables = paste(
+            v,
+            collapse = " + "
+          ),
+          AIC = AIC(fit),
+          RMSE = accuracy(
+            pred,
+            accidents_test
+          )[2,"RMSE"]
+        )
+      )
+      
+    }
+  }
+}
+
+results <- results[
+  order(results$RMSE),
+]
+
+top10 <- head(results, 10)
+
+top10
+```
+
+Le classement des modèles selon le RMSE montre que les meilleures performances prédictives sont obtenues avec des modèles intégrant principalement les variables pct_moto et pct_autoroute. La combinaison pct_autoroute + pct_moto obtient le RMSE le plus faible (51,53), tandis que l'ajout de pct_meteo conduit à une performance très proche (RMSE = 51,57). La variable pct_moto apparaît dans l'ensemble des dix meilleures combinaisons, ce qui suggère qu'elle constitue la variable exogène la plus informative pour expliquer les variations mensuelles du nombre d'accidents. Les variables pct_autoroute, pct_meteo et pct_intersection améliorent légèrement les performances lorsqu'elles sont combinées avec pct_moto, alors que pct_pieton est moins fréquemment présente parmi les meilleurs modèles.
+
+## Comparaison des structures SARIMAX
+
+```{r}
+modeles <- list(
+  
+  SARIMA_201_012 = list(
+    order = c(2,0,1),
+    seasonal = c(0,1,2)
+  ),
+  
+  SARIMA_101_012 = list(
+    order = c(1,0,1),
+    seasonal = c(0,1,2)
+  ),
+  
+  SARIMA_201_011 = list(
+    order = c(2,0,1),
+    seasonal = c(0,1,1)
+  ),
+  
+  SARIMA_201_112 = list(
+    order = c(2,0,1),
+    seasonal = c(1,1,2)
+  )
+)
+
+comparaison <- data.frame()
+
+for(i in 1:nrow(top10)){
+  
+  vars_i <- unlist(
+    strsplit(
+      top10$variables[i],
+      " \\+ "
+    )
+  )
+  
+  for(nom_modele in names(modeles)){
+    
+    spec <- modeles[[nom_modele]]
+    
+    fit <- Arima(
+      accidents_train,
+      order = spec$order,
+      seasonal = list(
+        order = spec$seasonal,
+        period = 12
+      ),
+      xreg = xreg_train_scaled[
+        ,
+        vars_i,
+        drop = FALSE
+      ]
+    )
+    
+    pred <- forecast(
+      fit,
+      h = length(accidents_test),
+      xreg = xreg_test_scaled[
+        ,
+        vars_i,
+        drop = FALSE
+      ]
+    )
+    
+    comparaison <- rbind(
+      comparaison,
+      data.frame(
+        modele = nom_modele,
+        variables = top10$variables[i],
+        AIC = AIC(fit),
+        RMSE = accuracy(
+          pred,
+          accidents_test
+        )[2,"RMSE"]
+      )
+    )
+  }
+}
+```
+
+## Comparaison des modèles selon l'AIC
+
+Le critère d'information d'Akaike est utilisé afin de comparer les différents modèles estimés. Un AIC plus faible traduit un meilleur compromis entre qualité d'ajustement et complexité du modèle.
+
+```{r}
+comparaison_AIC <- comparaison |>
+  arrange(AIC)
+
+head(comparaison_AIC, 20)
+```
+
+Les modèles présentant les plus faibles valeurs d'AIC correspondent principalement aux structures SARIMA(1,0,1)(0,1,2) et SARIMA(2,0,1)(0,1,1) associées à la variable pct_moto, seule ou combinée avec pct_intersection. Le plus faible AIC est obtenu pour le modèle SARIMA(1,0,1)(0,1,2) utilisant uniquement pct_moto (AIC = 1352,12). Les écarts d'AIC entre les meilleurs modèles restent toutefois très faibles (inférieurs à trois unités), ce qui indique que plusieurs spécifications offrent une qualité d'ajustement comparable sur les données d'apprentissage. Le critère AIC ne permettant pas à lui seul de juger des performances prédictives, une comparaison sur l'échantillon de test est également réalisée.
+
+
+
+## Comparaison des modèles selon le RMSE
+
+Les modèles sont ensuite comparés à partir du RMSE obtenu sur l'échantillon de test. Contrairement à l'AIC, cet indicateur mesure directement la qualité des prévisions sur des observations non utilisées lors de l'estimation.
+
+```{r}
+comparaison <- comparaison[
+  order(comparaison$RMSE),
+]
+
+head(comparaison,20)
+
+comparaison[1,]
+```
+
+Le classement selon le RMSE met en évidence que les meilleures performances de prévision sont obtenues avec le modèle SARIMA(2,0,1)(0,1,2) utilisant les variables pct_autoroute et pct_moto, avec un RMSE de 51,53. Les modèles intégrant pct_meteo en complément de ces deux variables obtiennent également des performances très proches (RMSE = 51,57). De manière générale, les écarts de RMSE entre les meilleurs modèles demeurent faibles (moins de 0,5 unité), ce qui montre que plusieurs spécifications présentent une capacité de prévision similaire. En revanche, le classement obtenu selon le RMSE diffère de celui fondé sur l'AIC : le modèle présentant le meilleur ajustement sur les données d'apprentissage n'est pas celui qui offre les meilleures performances de prévision sur l'échantillon de test. Cette différence souligne l'importance d'évaluer les modèles à l'aide d'indicateurs de prévision en complément des critères d'information.
+
+
+
+## Modèles candidats retenus
+
+Les modèles présentant les meilleures performances selon le RMSE sont retenus pour l'étape de validation. Ils feront l'objet d'une validation croisée afin de vérifier leur capacité de généralisation avant la sélection du modèle final.
+
+```{r}
+
+# Trois meilleurs modèles selon le RMSE
+modeles_candidats <- comparaison |>
+  dplyr::arrange(RMSE) |>
+  dplyr::slice(1:3)
+
+knitr::kable(
+  modeles_candidats,
+  digits = 3,
+  caption = "Modèles candidats retenus pour la validation"
+)
+```
+
+Les trois modèles présentant les plus faibles valeurs du RMSE sont retenus comme modèles candidats pour la phase suivante de validation. Ils correspondent à deux structures SARIMA différentes utilisant principalement les variables pct_autoroute et pct_moto, avec ou sans la variable pct_meteo. Leurs performances étant très proches, une évaluation complémentaire permettra de déterminer le modèle offrant le meilleur compromis entre qualité d'ajustement, précision des prévisions et robustesse.
+
+
+
+# Validation du modèle retenu
+
+Après la sélection des modèles candidats, une validation est réalisée afin d'évaluer leur capacité de généralisation. Cette étape comprend une validation croisée de type Expanding Window, suivie de l'estimation du modèle final sur l'ensemble des données disponibles et d'une analyse de ses résidus. L'objectif est de retenir le modèle offrant les meilleures performances prédictives tout en vérifiant que les hypothèses du modèle SARIMAX sont raisonnablement satisfaites.
+
+## Validation croisée (Expanding Window)
+
+Une validation croisée de type Expanding Window est réalisée afin d'évaluer les performances prédictives des modèles dans un contexte proche de leur utilisation réelle. À chaque itération, le modèle est estimé sur un historique progressivement enrichi avant de produire une prévision à un horizon d'un mois.
+
+### Construction de la matrice des variables exogènes
+
+Les variables exogènes des échantillons d'apprentissage et de test sont regroupées dans une matrice unique afin de faciliter la mise en œuvre de la validation croisée.
+
+```{r}
+xreg_scaled <- rbind(
+  xreg_train_scaled,
+  xreg_test_scaled
+)
+```
+
+### Fonction de validation croisée (prévision à un pas)
+
+Une fonction est définie afin d'estimer successivement le modèle sur des fenêtres d'apprentissage de taille croissante et de calculer le RMSE associé aux prévisions réalisées à un pas.
+
+```{r}
+cv_rmse <- function(vars){
+  
+  erreurs <- c()
+  
+  # Nombre minimal d'observations (≈ 5 ans de données mensuelles)
+  # afin d'obtenir une estimation stable du modèle SARIMA.
+  debut_cv <- 61
+  
+  for(i in debut_cv:(length(accidents_ts) - 1)){
+    
+    # Série d'apprentissage
+    
+    y_train <- window(
+      accidents_ts,
+      end = time(accidents_ts)[i]
+    )
+    
+    # Observation à prédire
+    
+    y_test <- accidents_ts[i + 1]
+
+    x_train <- xreg_scaled[
+      1:i,
+      vars,
+      drop = FALSE
+    ]
+    
+    x_test <- xreg_scaled[
+      i + 1,
+      vars,
+      drop = FALSE
+    ]
+    
+    # Estimation du modèle
+    fit <- try(
+      Arima(
+        y_train,
+        order = c(2, 0, 1),
+        seasonal = list(
+          order = c(0, 1, 2),
+          period = 12
+        ),
+        xreg = x_train
+      ),
+      silent = TRUE
+    )
+  
+# Prévision à un pas
+
+
+if(!inherits(fit, "try-error")){
+      
+      pred <- forecast(
+        fit,
+        h = 1,
+        xreg = x_test
+      )
+      
+      erreurs <- c(
+        erreurs,
+        y_test - pred$mean[1]
+      )
+    }
+  }
+  
+  if(length(erreurs) == 0){
+    return(NA_real_)
+  }
+  
+  sqrt(mean(erreurs^2))
+}
+```
+
+### Comparaison des modèles candidats
+
+Les modèles candidats sont comparés à partir du RMSE obtenu lors de la validation croisée. Cette comparaison permet de sélectionner le modèle offrant les meilleures performances prédictives sur l'ensemble de la période étudiée.
+
+
+
+```{r}
+resultats_cv <- data.frame(
+  Modele = c(
+    "pct_moto",
+    "pct_autoroute + pct_moto",
+    "pct_meteo + pct_autoroute + pct_moto"
+  ),
+  RMSE_CV = c(
+    cv_rmse("pct_moto"),
+    cv_rmse(c("pct_autoroute", "pct_moto")),
+    cv_rmse(c("pct_meteo", "pct_autoroute", "pct_moto"))
+  )
+)
+
+knitr::kable(
+  resultats_cv,
+  digits = 3,
+  caption = "Résultats de la validation croisée"
+)
+```
+
+Les résultats de la validation croisée montrent que le modèle intégrant uniquement pct_moto obtient le plus faible RMSE (29,39), devant les modèles utilisant pct_autoroute + pct_moto (29,83) et pct_meteo + pct_autoroute + pct_moto (29,98). Les écarts entre ces performances restent toutefois relativement faibles, ce qui indique que les trois spécifications présentent une capacité prédictive comparable. Le modèle utilisant uniquement pct_moto est finalement retenu au regard de son meilleur compromis entre précision de prévision et simplicité.
+
+
+
+## Estimation du modèle final
+
+Le modèle sélectionné à l'issue de la validation croisée est ensuite réestimé sur l'ensemble des données disponibles afin d'obtenir les estimations finales des paramètres qui seront utilisées pour les analyses de diagnostic et les prévisions.
+
+```{r}
+modele_final <- Arima(
+  accidents_ts,
+  order = c(2, 0, 1),
+  seasonal = list(
+    order = c(0, 1, 2),
+    period = 12
+  ),
+  xreg = xreg_scaled[, "pct_moto", drop = FALSE]
+)
+
+resume_modele <- data.frame(
+  Critere = c("AIC"),
+  Valeur = c(AIC(modele_final))
+)
+
+knitr::kable(
+  resume_modele,
+  digits = 3,
+  caption = "Critère d'information du modèle final"
+)
+
+coef_modele <- data.frame(
+  Paramètre = names(coef(modele_final)),
+  Estimation = coef(modele_final)
+)
+
+knitr::kable(
+  coef_modele,
+  digits = 4,
+  caption = "Estimation des paramètres du modèle final"
+)
+```
+
+Les estimations obtenues correspondent aux paramètres du modèle final ajusté sur l'ensemble des observations disponibles. Ce modèle constitue la version définitive utilisée pour les diagnostics et les prévisions. Les coefficients associés aux variables exogènes permettent d'apprécier leur contribution à l'explication des variations mensuelles du nombre d'accidents.
+
+
+
+## Vérification des résidus
+
+L'analyse des résidus permet de vérifier que le modèle retenu satisfait les principales hypothèses des modèles SARIMAX. En particulier, les résidus doivent être assimilables à un bruit blanc, c'est-à-dire ne présenter ni autocorrélation résiduelle ni structure systématique.
+
+```{r}
+ljung <- Box.test(
+  residuals(modele_final),
+  lag = 24,
+  type = "Ljung-Box",
+  fitdf = length(coef(modele_final))
+)
+
+diagnostic <- data.frame(
+  Test = "Ljung-Box",
+  Statistique = as.numeric(ljung$statistic),
+  "p-value" = ljung$p.value
+)
+
+knitr::kable(
+  diagnostic,
+  digits = 4,
+  caption = "Résultat du test de Ljung-Box"
+)
+
+# Diagnostic graphique des résidus
+
+checkresiduals(modele_final)
+```
+
+Le test de Ljung-Box permet d'évaluer l'absence d'autocorrélation résiduelle. Une p-value supérieure au seuil de significativité indique que l'hypothèse de bruit blanc ne peut pas être rejetée, ce qui traduit un ajustement satisfaisant du modèle. Les graphiques de diagnostic permettent de compléter cette analyse en vérifiant la distribution des résidus et l'absence de structure résiduelle apparente.
+
+
+
+# Validation externe sur les données BAAC 2022
+
+Cette dernière étape consiste à évaluer les performances du modèle SARIMAX sur un jeu de données indépendant de celui utilisé pour son estimation. Les données BAAC de l'année 2022 sont utilisées comme base de validation externe afin de vérifier la capacité du modèle à généraliser ses prévisions sur de nouvelles observations.
+
+
+
+## Importation des fichiers BAAC 2022
+
+Les fichiers BAAC correspondant à l'année 2022 sont importés afin de constituer la base de données utilisée pour la validation externe du modèle
+
+```{r}
+# Lecture des fichiers BAAC 2022
+carac <- read_csv2(
+  "caracteristiques-2022.csv",
+  show_col_types = FALSE
+)
+
+veh <- read_csv2(
+  "vehicules-2022.csv",
+  show_col_types = FALSE)
+```
+
+## Construction de la base de validation
+
+
+
+Les accidents corporels survenus dans le département des Hauts-de-Seine sont sélectionnés puis les informations nécessaires sont fusionnées afin de reconstruire une base comparable à celle utilisée pour l'apprentissage.
+
+```{r}
+carac92 <- carac %>%
+  filter(dep == "92") %>%
+  rename(Num_Acc = Accident_Id)
+
+accidents_moto <- veh %>%
+  filter(catv %in% c(30, 31, 32, 33, 34)) %>%
+  distinct(Num_Acc) %>%
+  mutate(moto = 1)
+
+base92 <- carac92 %>%
+  left_join(accidents_moto, by = "Num_Acc") %>%
+  mutate(
+    moto = ifelse(is.na(moto), 0, 1),
+    mois = as.integer(mois)
+  )
+```
+
+La base de validation obtenue reprend la même structure que celle utilisée lors de l'estimation du modèle. Cette homogénéité garantit que la variable exogène est calculée selon la même méthodologie que celle utilisée lors de l'estimation du modèle, assurant ainsi la cohérence entre les phases d'apprentissage et de validation.
+
+
+
+## Construction de la variable exogène mensuelle 2022
+
+La variable exogène retenue dans le modèle final est calculée mensuellement selon la même méthodologie que celle appliquée aux données historiques.
+
+```{r}
+xreg_2022 <- base92 %>%
+  group_by(mois) %>%
+  summarise(
+    nb_accidents = n(),
+    pct_moto = mean(moto, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(mois)
+```
+
+La proportion mensuelle d'accidents impliquant une moto est calculée pour chacun des mois de l'année 2022.
+
+
+
+## Standardisation de la variable
+
+La variable exogène est standardisée à partir des paramètres calculés sur les données d'apprentissage afin d'assurer la cohérence entre les différentes phases de modélisation.
+
+```{r}
+centre <- unname(attr(xreg_train_scaled, "scaled:center")["pct_moto"])
+ecart  <- unname(attr(xreg_train_scaled, "scaled:scale")["pct_moto"])
+
+xreg_2022_scaled <- scale(
+  xreg_2022[, "pct_moto", drop = FALSE],
+  center = centre,
+  scale  = ecart
+)
+
+colnames(xreg_2022_scaled) <- "pct_moto"
+```
+
+L'utilisation des mêmes paramètres de centrage et de réduction que ceux employés lors de l'estimation évite toute fuite d'information provenant des données de validation et garantit la comparabilité de la variable exogène avec celle utilisée lors de l'estimation du modèle.
+
+
+
+## Vérification de la cohérence des données
+
+Plusieurs contrôles sont réalisés afin de vérifier la compatibilité des données de validation avec le modèle estimé.
+
+```{r}
+# Vérification des dimensions
+length(accidents_ts)
+nrow(xreg_scaled)
+nrow(xreg_2022_scaled)
+
+# Vérification des noms des variables exogènes
+
+colnames(xreg_scaled)
+colnames(xreg_2022_scaled)
+
+# Vérification des variables attendues par le modèle final
+
+coef(modele_final)
+
+# Vérification du nombre de variables exogènes
+
+ncol(xreg_2022_scaled)
+```
+
+Les contrôles confirment que la matrice des variables exogènes de validation est cohérente avec celle utilisée lors de l'estimation du modèle. Le modèle final ne comporte qu'une seule variable exogène, pct_moto, et la matrice xreg_2022_scaled présente bien le même nom de variable ainsi que le nombre de colonnes attendu. Les données sont ainsi compatibles avec la fonction de prévision `forecast()`.
+
+
+
+## Prévision des accidents en 2022
+
+Le modèle SARIMAX retenu est utilisé pour produire les prévisions mensuelles du nombre d'accidents corporels sur l'année 2022 à partir des variables exogènes observées.
+
+```{r}
+
+prevision_2022 <- forecast(
+  modele_final,
+  h = 12,
+  xreg = xreg_2022_scaled
+)
+```
+
+## Comparaison entre les prévisions et les observations
+
+Les valeurs prédites sont comparées aux observations réellement enregistrées afin d'évaluer la qualité des prévisions produites par le modèle.
+
+```{r}
+obs_2022 <- c(
+  162, 173, 219, 178,
+  262, 276, 228, 127,
+  258, 235, 197, 204
+)
+
+validation_2022 <- data.frame(
+  Mois = factor(month.abb, levels = month.abb),
+  Observe = obs_2022,
+  Prevision = round(as.numeric(prevision_2022$mean))
+)
+
+validation_2022 <- transform(
+  validation_2022,
+  Erreur = Observe - Prevision,
+  Erreur_abs = abs(Observe - Prevision),
+  Erreur_pct = 100 * (Observe - Prevision) / Observe
+)
+
+knitr::kable(
+  validation_2022,
+  digits = 1,
+  caption = "Comparaison entre les observations et les prévisions en 2022"
+)
+```
+
+Le tableau met en évidence que le modèle reproduit globalement l'évolution mensuelle des accidents corporels en 2022. Les prévisions sont particulièrement proches des observations pour les mois de février, avril, août, septembre et octobre. En revanche, des écarts plus importants apparaissent en janvier, mai, juin et novembre, où le modèle sous-estime ou surestime davantage le nombre d'accidents. Malgré ces différences ponctuelles, les prévisions suivent correctement la dynamique générale de la série.
+
+
+
+## Évaluation des performances prédictives
+
+Les performances du modèle sont quantifiées à l'aide de plusieurs indicateurs complémentaires : le MAE, le RMSE et le MAPE.
+
+```{r}
+MAE <- mean(validation_2022$Erreur_abs)
+RMSE <- sqrt(mean(validation_2022$Erreur^2))
+MAPE <- mean(abs(validation_2022$Erreur_pct))
+
+cat("MAE  =", round(MAE, 2), "\n")
+cat("RMSE =", round(RMSE, 2), "\n")
+cat("MAPE =", round(MAPE, 2), "%\n")
+```
+
+Les indicateurs obtenus sont les suivants : un MAE de 22,58 accidents, un RMSE de 28,56 accidents et un MAPE de 10,58 %. Ces résultats indiquent qu'en moyenne les prévisions s'écartent d'une vingtaine d'accidents des valeurs observées, avec une erreur relative moyenne d'environ 11 %. Cette précision peut être considérée comme satisfaisante pour une série mensuelle d'accidents corporels présentant une variabilité importante. Le RMSE, légèrement supérieur au MAE, traduit la présence de quelques erreurs plus marquées sur certains mois, notamment en janvier et en mai.
+
+
+
+## Visualisation des prévisions
+
+Une représentation graphique est réalisée afin de comparer visuellement les valeurs observées et les valeurs prédites sur l'ensemble de l'année 2022.
+
+```{r}
+ggplot(validation_2022, aes(x = Mois, group = 1)) +
+  geom_line(aes(y = Prevision, colour = "Prévision"),
+            linewidth = 1.3) +
+  geom_point(aes(y = Prevision, colour = "Prévision"),
+              size = 3) +
+  geom_line(aes(y = Observe, colour = "Observé"),
+            linewidth = 1.3) +
+  geom_point(aes(y = Observe, colour = "Observé"),
+             size = 3) +
+
+  scale_colour_manual(
+    name = NULL,
+    values = c(
+      "Prévision" = "blue3",
+      "Observé" = "red3"
+    )
+  ) +
+  annotate(
+    "label",
+    x = 3,
+    y = 145,
+    hjust = 0,
+    size = 4.5,
+    label = paste0(
+      "MAE = ", sprintf("%.2f", MAE),
+      "\nRMSE = ", sprintf("%.2f", RMSE),
+      "\nMAPE = ", sprintf("%.2f %%", MAPE)
+    ),
+    fill = "white",
+    colour = "black"
+  ) +
+  labs(
+    title = "Validation du modèle SARIMAX (2022)",
+    x = "Mois",
+    y = "Nombre d'accidents"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+
+    plot.title = element_text(
+      face = "bold",
+      size = 20,
+      hjust = 0.5
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 15
+    ),
+    legend.position = "bottom",
+    legend.text = element_text(size = 12)
+  )
+
+ggsave("graphics/08_Visualisation_des_prévisions.png", width = 8, height = 5, dpi = 300)
+```
+
+Le modèle SARIMAX(2,0,1)(0,1,2)12 intégrant la variable pct_moto présente des performances prédictives satisfaisantes, avec un MAPE de 10,58 % sur l'échantillon de validation externe 2022. Néanmoins, l'analyse graphique montre une sous-estimation systématique des pics de sinistralité observés en mai et juin.
+
+Cette limite structurelle provient de la nature de la variable exogène : il s'agit d'une proportion relative et non d'une mesure de l'exposition absolue au risque. En période printanière, l'augmentation du volume global de circulation des deux-roues motorisés (kilomètres parcourus) accroît l'exposition, un phénomène que la seule part relative des motos ne peut pas capter. Ce manque d'information se traduit par un lissage des prévisions lors des fortes variations saisonnières.
+
+Pour corriger ce biais, une amélioration du modèle consisterait à introduire des variables de pure exposition. L'intégration d'indices de trafic routier en Île-de-France ou de données météorologiques (ensoleillement, températures moyennes) permettrait d'agir comme des variables d'approximation (proxies) de l'intensité réelle de circulation.
