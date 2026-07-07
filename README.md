@@ -228,9 +228,6 @@ Le rapport complet est disponible :
 
 ---
 
-## Auteur
-
-**M**
 
 Projet réalisé dans le cadre d'un travail de modélisation actuarielle appliquée à la prévision de la sinistralité routière.
 Le modèle restitue avec précision la dynamique saisonnière globale (notamment le creux historique du mois d'août et la reprise d'automne), bien qu'il présente un léger lissage sur les pics d'exposition printaniers (mai/juin).
