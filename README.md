@@ -1,46 +1,236 @@
-# Modélisation de la Sinistralité Routière - SARIMAX (Hauts-de-Seine)
+# Modélisation de la Sinistralité Routière par SARIMAX
+### Prévision des accidents corporels dans les Hauts-de-Seine (92)
 
-Ce projet d'actuariat présente une chaîne complète de traitement, d'analyse exploratoire (EDA) et de modélisation prédictive du nombre mensuel d'accidents corporels dans le département des Hauts-de-Seine (92).
+## Présentation
 
----
+Ce projet d'actuariat présente une chaîne complète de traitement, d'analyse exploratoire et de modélisation prédictive du nombre mensuel d'accidents corporels dans le département des **Hauts-de-Seine (92)**.
 
-##  Sources des Données & Documentation
-
-Le jeu de données final est issu du croisement de plusieurs sources officielles de service public :
-
-1. **Données Historiques (2006 - 2021) :**
-   * [Data.gouv.fr - Accidents corporels de la circulation routière](https://www.data.gouv.fr/datasets/accidents-corporels-de-la-circulation-routiere)
-   * [Data.gouv.fr - Bases de données annuelles de 2005 à nos jours](https://www.data.gouv.fr/datasets/bases-de-donnees-annuelles-des-accidents-corporels-de-la-circulation-routiere-annees-de-2005-a-2024)
-2. **Données de Validation Externe (Année 2022 complète) :**
-   * Les données mensuelles réelles de l'année 2022 de validation ont été extraites du **Baromètre de la Sécurité Routière du mois de décembre 2022 (DRIEAT Île-de-France)**, publié par la Préfecture de la Région d'Île-de-France.
-   * *Exemples de données réelles intégrées (Bilan 2022)* : Janvier = 162, Mai = 262, Juin = 276, Août = 127, Décembre = 204 accidents (Total annuel : 2 519 accidents corporels).
-3. **Nomenclature & Méthodologie :**
-   * Les règles métiers, l'organisation et la sémantique des variables proviennent des manuels méthodologiques de l'**ONISR (Observatoire National Interministériel de la Sécurité Routière)**.
+L'objectif est de construire un modèle de séries temporelles capable de prévoir l'évolution mensuelle de la sinistralité routière à partir des données historiques de la Base des Accidents Corporels de la Circulation (BAAC) et de variables explicatives décrivant les caractéristiques des accidents.
 
 ---
 
-##  Architecture des Données (MySQL)
+## Structure du dépôt
 
-Les données de la BAAC sont stockées et pré-agrégées dans une base de données MySQL nommée `projet_actuariat`.
-* `accidents` / `accidents_propre` : Données brutes et nettoyées au niveau individuel.
-* `accidents_mensuels` : Vue SQL calculant dynamiquement les agrégats mensuels (`nb_accidents`) et les indicateurs de structure (`pct_moto`, `pct_nuit`, `pct_meteo`, etc.).
+```text
+Projet_actuariat/
+├── README.md                    # Présentation du projet
+├── .gitignore                   # Fichiers ignorés par Git
+├── _Projet_Actuariat_.Rmd       # Code source du rapport R Markdown
+├── docs/
+│   └── index.html               # Rapport HTML
+├── graphics/                    # Graphiques générés
+│   ├── 01_evolution_mensuelle.png
+│   ├── 02_decomposition.png
+│   ├── ...
+│   └── 08_Visualisation_des_prévisions.png
+└── sql/
+    ├── create_tables.sql
+    └── create_view.sql
+```
 
 ---
 
-##  Démarche Statistique & Modélisation
+## Sources des données
 
-* **Analyse de la stationnarité :** Traitement de la rupture structurelle liée aux confinements (2020) et application d'une double différenciation $(d=1, D=1)_{12}$ validée par les tests ADF, KPSS et l'analyse des fonctions ACF/PACF.
-* **Sélection des variables exogènes :** Évaluation de la multicolinéarité via le calcul du VIF (maximum mesuré à 2,39) et sélection sur grille des meilleures combinaisons par minimisation du RMSE.
-* **Validation Croisée :** Évaluation des performances hors-échantillon par une méthodologie de fenêtre croissante (*Expanding Window*).
-* **Modèle Retenu :** Structure $SARIMAX(2,0,1)(0,1,2)_{12}$ centrée sur la variable exogène `pct_moto`.
+Les données utilisées proviennent exclusivement de sources publiques officielles.
+
+### Données historiques (2006–2021)
+
+- Base des Accidents Corporels de la Circulation (BAAC)
+- data.gouv.fr – Accidents corporels de la circulation routière
+- data.gouv.fr – Bases de données annuelles (2005 à aujourd'hui)
+
+### Données de validation externe (année 2022)
+
+Les observations réelles utilisées pour la validation hors échantillon proviennent du :
+
+- **Baromètre de la Sécurité Routière – Décembre 2022**
+- DRIEAT Île-de-France
+- Préfecture de la Région Île-de-France
+
+Exemple des valeurs observées :
+
+| Mois | Nombre d'accidents |
+|------:|-------------------:|
+| Janvier | 162 |
+| Mai | 262 |
+| Juin | 276 |
+| Août | 127 |
+| Décembre | 204 |
+
+**Total annuel 2022 : 2 519 accidents corporels**
+
+### Documentation méthodologique
+
+La définition des variables et la nomenclature proviennent des documents méthodologiques de l'Observatoire National Interministériel de la Sécurité Routière (ONISR).
 
 ---
 
-##  Résultats de la Validation Externe (2022)
+## Architecture des données
 
-Le modèle final a été confronté aux données réelles de la DRIEAT pour l'année 2022. Les indicateurs de performance prédictive sont :
-* **MAE :** 22,58 accidents
-* **RMSE :** 28,56 accidents
-* **MAPE :** 10,58 %
+Les données sont stockées dans une base **MySQL** nommée :
 
+```
+projet_actuariat
+```
+
+### Tables
+
+- **accidents** : données brutes BAAC
+- **accidents_propre** : données nettoyées
+
+### Vue SQL
+
+**accidents_mensuels**
+
+Cette vue calcule automatiquement :
+
+- nombre mensuel d'accidents ;
+- proportion de motocyclistes (`pct_moto`) ;
+- proportion d'accidents de nuit (`pct_nuit`) ;
+- conditions météorologiques (`pct_meteo`) ;
+- autres indicateurs agrégés.
+
+Les scripts SQL sont disponibles dans le dossier :
+
+```
+sql/
+```
+
+---
+
+## Méthodologie
+
+### 1. Préparation des données
+
+- nettoyage des données BAAC ;
+- agrégation mensuelle ;
+- création des variables exogènes.
+
+### 2. Analyse exploratoire (EDA)
+
+- évolution temporelle ;
+- saisonnalité ;
+- décomposition de la série ;
+- distributions ;
+- corrélations ;
+- visualisations graphiques.
+
+Les figures sont disponibles dans :
+
+```
+graphics/
+```
+
+---
+
+## Modélisation statistique
+
+### Stationnarité
+
+La série a été rendue stationnaire après prise en compte de la rupture structurelle liée aux confinements de 2020.
+
+Le modèle repose sur :
+
+- différenciation non saisonnière : **d = 1**
+- différenciation saisonnière : **D = 1**
+- période saisonnière : **12 mois**
+
+La stationnarité est validée par :
+
+- test ADF ;
+- test KPSS ;
+- analyse des fonctions ACF et PACF.
+
+---
+
+### Sélection des variables exogènes
+
+Les variables candidates ont été évaluées à partir :
+
+- du facteur d'inflation de variance (VIF) ;
+- d'une recherche sur grille (Grid Search) ;
+- de la minimisation du RMSE.
+
+Le VIF maximal observé est :
+
+**2,39**
+
+indiquant une faible multicolinéarité.
+
+---
+
+### Validation croisée
+
+Les performances sont évaluées par une validation en **fenêtre croissante (Expanding Window)**.
+
+Cette approche reproduit les conditions réelles de prévision en utilisant uniquement les observations disponibles à chaque date.
+
+---
+
+## Modèle retenu
+
+Le meilleur modèle obtenu est :
+
+**SARIMAX(2,0,1)(0,1,2)[12]**
+
+avec comme variable exogène principale :
+
+- **pct_moto**
+
+---
+
+## Validation externe (année 2022)
+
+Le modèle est testé sur les données réelles de la DRIEAT pour l'année 2022.
+
+### Performances
+
+| Indicateur | Valeur |
+|------------|--------|
+| MAE | 22,58 |
+| RMSE | 28,56 |
+| MAPE | 10,58 % |
+
+Le modèle reproduit correctement :
+
+- la saisonnalité annuelle ;
+- le minimum estival observé en août ;
+- la reprise de l'activité à l'automne.
+
+Une légère sous-estimation est observée lors des pics printaniers (mai–juin).
+
+---
+
+## Technologies utilisées
+
+- R
+- R Markdown
+- MySQL
+- SQL
+- dplyr
+- ggplot2
+- forecast
+- tseries
+- lmtest
+- car
+- DBI
+- RMySQL
+
+---
+
+## Rapport
+
+Le rapport complet est disponible :
+
+- **Version HTML** : `docs/index.html`
+- **Code source** : `_Projet_Actuariat_.Rmd`
+
+---
+
+## Auteur
+
+**M**
+
+Projet réalisé dans le cadre d'un travail de modélisation actuarielle appliquée à la prévision de la sinistralité routière.
 Le modèle restitue avec précision la dynamique saisonnière globale (notamment le creux historique du mois d'août et la reprise d'automne), bien qu'il présente un léger lissage sur les pics d'exposition printaniers (mai/juin).
