@@ -1,21 +1,32 @@
+# Modélisation de la Sinistralité Routière par SARIMAX
 
+## Prévision des accidents corporels dans les Hauts-de-Seine (92)
 
+---
+
+## Rapport complet
+
+Ce projet d'actuariat porte sur la modélisation et la prévision du nombre mensuel d'accidents corporels de la circulation dans les Hauts-de-Seine (92).
+
+**[Consulter le rapport complet en ligne](https://magda242424.github.io/Projet_actuariat/)**
+
+**[Consulter le code source R Markdown](./_Projet_Actuariat_.Rmd)**
+
+Le rapport complet présente l'ensemble de la démarche, depuis la préparation des données jusqu'à la validation des prévisions.
 
 ---
 
 # 1. Présentation du projet
 
-Ce projet d'actuariat porte sur la **modélisation et la prévision du nombre mensuel d'accidents corporels de la circulation dans les Hauts-de-Seine (92)**.
+L'objectif est de construire un modèle de séries temporelles capable de prévoir l'évolution mensuelle de la sinistralité routière à partir :
 
-L'objectif est de construire un modèle de séries temporelles capable de prévoir l'évolution de la sinistralité routière à partir :
-
-- des données historiques de la Base des Accidents Corporels de la Circulation (BAAC) ;
-- de variables explicatives décrivant les caractéristiques des accidents ;
-- de la dynamique temporelle et de la saisonnalité mensuelle.
+* des données historiques de la Base des Accidents Corporels de la Circulation (BAAC) ;
+* de variables explicatives décrivant les caractéristiques des accidents ;
+* de la dynamique temporelle et de la saisonnalité mensuelle.
 
 Le projet couvre l'ensemble de la chaîne de traitement :
 
-**Données → Nettoyage → Analyse exploratoire → Création des variables → Modélisation → Validation croisée → Prévision → Validation externe**
+**Données → Nettoyage → Analyse exploratoire → Création des variables → Modélisation SARIMAX → Validation croisée → Prévision → Validation externe**
 
 ---
 
@@ -23,16 +34,16 @@ Le projet couvre l'ensemble de la chaîne de traitement :
 
 Les principaux objectifs sont :
 
-- analyser l'évolution temporelle de la sinistralité routière ;
-- identifier la saisonnalité des accidents corporels ;
-- étudier les caractéristiques des accidents ;
-- construire des variables explicatives mensuelles ;
-- vérifier la stationnarité de la série ;
-- sélectionner les variables exogènes pertinentes ;
-- comparer différents modèles SARIMAX ;
-- utiliser une validation en fenêtre croissante ;
-- mesurer les performances prédictives ;
-- réaliser une validation externe sur les données de l'année 2022.
+* analyser l'évolution temporelle de la sinistralité routière ;
+* identifier la saisonnalité des accidents corporels ;
+* étudier les caractéristiques des accidents ;
+* construire des variables explicatives mensuelles ;
+* vérifier la stationnarité de la série ;
+* sélectionner les variables exogènes pertinentes ;
+* comparer différents modèles SARIMAX ;
+* utiliser une validation en fenêtre croissante ;
+* mesurer les performances prédictives ;
+* réaliser une validation externe sur les données de l'année 2022.
 
 ---
 
@@ -42,17 +53,13 @@ Les principaux objectifs sont :
 
 Les données historiques couvrent la période **2006–2021**.
 
-Elles proviennent principalement de la **Base des Accidents Corporels de la Circulation (BAAC)**, disponible via les sources publiques officielles.
+Elles proviennent de sources publiques officielles :
 
-Sources :
-
-- Base des Accidents Corporels de la Circulation (BAAC)
-- data.gouv.fr
-- Bases de données annuelles des accidents corporels de la circulation routière
+* Base des Accidents Corporels de la Circulation (BAAC) ;
+* data.gouv.fr ;
+* bases de données annuelles des accidents corporels de la circulation routière.
 
 Les données sont utilisées pour construire une série mensuelle du nombre d'accidents corporels dans le département des Hauts-de-Seine (92).
-
----
 
 ## Données de validation externe
 
@@ -60,19 +67,19 @@ La validation hors échantillon est réalisée sur l'année **2022**.
 
 Les observations réelles utilisées pour cette validation proviennent notamment du :
 
-- Baromètre de la Sécurité Routière – Décembre 2022 ;
-- DRIEAT Île-de-France ;
-- Préfecture de la Région Île-de-France.
+* Baromètre de la Sécurité Routière – Décembre 2022 ;
+* DRIEAT Île-de-France ;
+* Préfecture de la Région Île-de-France.
 
 Quelques valeurs observées :
 
-| Mois | Nombre d'accidents |
-|---|---:|
-| Janvier | 162 |
-| Mai | 262 |
-| Juin | 276 |
-| Août | 127 |
-| Décembre | 204 |
+| Mois     | Nombre d'accidents |
+| -------- | -----------------: |
+| Janvier  |                162 |
+| Mai      |                262 |
+| Juin     |                276 |
+| Août     |                127 |
+| Décembre |                204 |
 
 **Total annuel 2022 : 2 519 accidents corporels**
 
@@ -80,21 +87,21 @@ Quelques valeurs observées :
 
 # 4. Architecture des données
 
-Les données sont stockées dans une base de données **MySQL** appelée :
+Les données sont stockées dans une base de données MySQL appelée :
 
 ```text
 projet_actuariat
-````
+```
 
 ## Tables principales
 
 ### `accidents`
 
-Contient les données brutes issues de la BAAC.
+Données brutes issues de la BAAC.
 
 ### `accidents_propre`
 
-Contient les données nettoyées et préparées pour l'analyse.
+Données nettoyées et préparées pour l'analyse.
 
 ## Vue SQL
 
@@ -104,17 +111,15 @@ La vue :
 accidents_mensuels
 ```
 
-permet d'obtenir les indicateurs mensuels utilisés pour la modélisation.
+permet de calculer les indicateurs mensuels utilisés pour la modélisation :
 
-Elle permet notamment de calculer :
+* nombre mensuel d'accidents ;
+* proportion de motocyclistes (`pct_moto`) ;
+* proportion d'accidents de nuit (`pct_nuit`) ;
+* indicateurs météorologiques ;
+* autres variables agrégées.
 
-* le nombre mensuel d'accidents ;
-* la proportion de motocyclistes (`pct_moto`) ;
-* la proportion d'accidents de nuit (`pct_nuit`) ;
-* les indicateurs météorologiques ;
-* différents indicateurs agrégés décrivant la sinistralité.
-
-Les scripts SQL sont disponibles dans le dossier [`sql/`](./sql/).
+Les scripts SQL sont disponibles dans le dossier [sql](./sql/).
 
 ---
 
@@ -128,88 +133,74 @@ Elle porte notamment sur :
 * la tendance temporelle ;
 * la saisonnalité ;
 * la décomposition de la série ;
-* les distributions ;
-* les corrélations ;
-* les caractéristiques des accidents.
+* la distribution de la variable cible ;
+* la distribution mensuelle ;
+* les comparaisons interannuelles ;
+* les corrélations entre les variables.
 
-## 5.1 Évolution mensuelle
+## 5.1 Évolution mensuelle de la sinistralité
 
-L'évolution mensuelle permet d'identifier les principales variations du nombre d'accidents au cours de la période étudiée.
+L'évolution mensuelle permet d'observer la dynamique du nombre d'accidents corporels sur l'ensemble de la période étudiée.
 
-![Évolution mensuelle de la sinistralité](./docs/graphics/01_evolution_mensuelle.png)
+![Évolution mensuelle du nombre d'accidents](./graphics/01_evolution_mensuelle.png)
 
 ---
 
-## 5.2 Décomposition de la série
+## 5.2 Décomposition de la série temporelle
 
-La décomposition permet de distinguer les principales composantes de la série temporelle :
+La décomposition permet d'identifier les différentes composantes de la série :
 
 * tendance ;
 * saisonnalité ;
 * résidus.
 
-![Décomposition de la série temporelle](./docs/graphics/02_decomposition.png)
+![Décomposition de la série temporelle](./graphics/02_decomposition.png)
 
 ---
 
-## 5.3 Analyse des distributions
+## 5.3 Distribution de la variable cible
 
-L'étude des distributions permet de caractériser les principales variables utilisées dans l'analyse et d'identifier leur comportement statistique.
+L'analyse de la distribution du nombre d'accidents permet d'étudier la dispersion de la variable cible et sa concentration autour de ses valeurs centrales.
 
-![Analyse des distributions](./docs/graphics/03_distributions.png)
-
----
-
-## 5.4 Analyse des corrélations
-
-L'analyse des corrélations permet d'étudier les relations entre le nombre d'accidents et les différentes variables explicatives candidates.
-
-![Matrice des corrélations](./docs/graphics/04_correlations.png)
+![Distribution de la variable cible](./graphics/03_distribution_de_la_variable_cible.png)
 
 ---
 
-## 5.5 Analyse des variables explicatives
+## 5.4 Boxplot de la variable cible
 
-Les variables explicatives sont étudiées afin d'identifier les facteurs susceptibles d'améliorer les performances prédictives du modèle.
+Le boxplot permet d'analyser la dispersion du nombre d'accidents et d'identifier d'éventuelles valeurs atypiques.
 
-![Analyse des variables explicatives](./docs/graphics/05_variables_explicatives.png)
-
----
-
-## 5.6 Analyse de la stationnarité
-
-La stationnarité constitue une étape essentielle avant la modélisation de la série temporelle.
-
-Les analyses reposent notamment sur :
-
-* le test ADF ;
-* le test KPSS ;
-* l'ACF ;
-* la PACF.
-
-![Analyse de la stationnarité](./docs/graphics/06_stationnarite.png)
+![Boxplot de la variable cible](./graphics/04_boxplot_de_la_Variable_cible.png)
 
 ---
 
-## 5.7 Validation du modèle
+## 5.5 Distribution mensuelle
 
-Les modèles candidats sont comparés à partir de leurs performances prédictives et de différents critères statistiques.
+L'analyse de la distribution mensuelle permet de mettre en évidence les différences de sinistralité entre les différents mois de l'année.
 
-![Validation et comparaison des modèles](./docs/graphics/07_validation_modele.png)
+![Distribution mensuelle des accidents](./graphics/05_distribution_mensuelle.png)
 
 ---
 
-## 5.8 Prévisions finales
+## 5.6 Comparaison interannuelle
 
-La visualisation finale permet de comparer les valeurs observées aux prévisions du modèle sur la période de validation.
+La comparaison interannuelle permet d'étudier l'évolution de la sinistralité d'une année à l'autre et d'identifier les années présentant des comportements particuliers.
 
-![Visualisation des prévisions](./docs/graphics/08_Visualisation_des_prévisions.png)
+![Comparaison interannuelle](./graphics/06_Comparaison_interannuelle.png)
+
+---
+
+## 5.7 Matrice de corrélations
+
+La matrice de corrélations permet d'étudier les relations entre les différentes variables utilisées dans l'analyse et d'identifier les éventuels problèmes de multicolinéarité.
+
+![Matrice de corrélations](./graphics/07_Matrice_de_corrélations.png)
 
 ---
 
 # 6. Stationnarité
 
-La série temporelle est analysée afin de vérifier ses propriétés de stationnarité.
+La stationnarité constitue une étape essentielle avant la modélisation de la série temporelle.
 
 Les outils utilisés sont :
 
@@ -263,7 +254,7 @@ Cette méthode permet de reproduire les conditions réelles de prévision.
 3. l'observation réelle est ajoutée à l'échantillon d'apprentissage ;
 4. le processus est répété.
 
-Cette approche permet d'éviter d'utiliser des observations futures lors de l'entraînement et fournit une évaluation plus réaliste de la capacité prédictive du modèle.
+Cette approche permet d'évaluer la capacité du modèle à généraliser dans le temps tout en évitant l'utilisation d'informations futures lors de l'entraînement.
 
 ---
 
@@ -317,29 +308,11 @@ Une légère sous-estimation est observée lors des pics printaniers, notamment 
 
 ---
 
-# 11. Principaux résultats
-
-Les résultats obtenus montrent que le modèle est capable de reproduire correctement la dynamique globale de la sinistralité routière.
-
-Les principaux enseignements sont :
-
-* présence d'une saisonnalité annuelle marquée ;
-* creux de sinistralité au mois d'août ;
-* reprise de la sinistralité à l'automne ;
-* bonne capacité de généralisation sur les données de 2022 ;
-* MAPE de **10,58 %** sur la validation externe ;
-* MAE de **22,58 accidents** ;
-* RMSE de **28,56 accidents**.
-
-Le modèle présente néanmoins un léger lissage des pics de sinistralité observés au printemps, notamment en mai et juin.
-
----
-
-# 12. Visualisation des prévisions
+# 11. Visualisation des prévisions
 
 La comparaison entre les valeurs observées et les valeurs prédites permet d'évaluer graphiquement la capacité du modèle à reproduire la dynamique réelle de la sinistralité.
 
-![Prévisions du modèle SARIMAX](./docs/graphics/08_Visualisation_des_prévisions.png)
+![Visualisation des prévisions du modèle SARIMAX](./graphics/08_Visualisation_des_prévisions.png)
 
 Cette visualisation met notamment en évidence :
 
@@ -347,6 +320,24 @@ Cette visualisation met notamment en évidence :
 * le creux observé durant l'été ;
 * la reprise automnale ;
 * le léger lissage des pics printaniers.
+
+---
+
+# 12. Principaux résultats
+
+Le modèle permet de reproduire correctement la dynamique temporelle globale du nombre d'accidents corporels.
+
+Les principaux résultats sont :
+
+* présence d'une saisonnalité annuelle marquée ;
+* creux de sinistralité au mois d'août ;
+* reprise de la sinistralité à l'automne ;
+* bonne capacité de généralisation sur les données de 2022 ;
+* MAE de **22,58 accidents** ;
+* RMSE de **28,56 accidents** ;
+* MAPE de **10,58 %**.
+
+Le modèle présente néanmoins un léger lissage des pics de sinistralité observés au printemps, notamment en mai et juin.
 
 ---
 
@@ -393,18 +384,18 @@ Projet_actuariat/
 │   └── Code source complet du rapport
 │
 ├── docs/
-│   ├── index.html
-│   │   └── Rapport HTML
-│   │
-│   └── graphics/
-│       ├── 01_evolution_mensuelle.png
-│       ├── 02_decomposition.png
-│       ├── 03_distributions.png
-│       ├── 04_correlations.png
-│       ├── 05_variables_explicatives.png
-│       ├── 06_stationnarite.png
-│       ├── 07_validation_modele.png
-│       └── 08_Visualisation_des_prévisions.png
+│   └── index.html
+│       └── Rapport HTML
+│
+├── graphics/
+│   ├── 01_evolution_mensuelle.png
+│   ├── 02_decomposition.png
+│   ├── 03_distribution_de_la_variable_cible.png
+│   ├── 04_boxplot_de_la_Variable_cible.png
+│   ├── 05_distribution_mensuelle.png
+│   ├── 06_Comparaison_interannuelle.png
+│   ├── 07_Matrice_de_corrélations.png
+│   └── 08_Visualisation_des_prévisions.png
 │
 └── sql/
     ├── create_tables.sql
@@ -417,25 +408,25 @@ Projet_actuariat/
 
 ## Rapport HTML
 
-**[Consulter le rapport complet en ligne](https://magda242424.github.io/Projet_actuariat/)**
+[Consulter le rapport complet en ligne](https://magda242424.github.io/Projet_actuariat/)
 
-## Code source R Markdown
+## Code source
 
-**[Consulter le code source](./_Projet_Actuariat_.Rmd)**
+[Consulter le fichier R Markdown](./_Projet_Actuariat_.Rmd)
 
 ## Scripts SQL
 
-**[Consulter les scripts SQL](./sql/)**
+[Consulter les scripts SQL](./sql/)
 
 ## Graphiques
 
-**[Consulter le dossier des graphiques](./docs/graphics/)**
+[Consulter le dossier des graphiques](./graphics/)
 
 ---
 
 # 16. Conclusion
 
-Ce projet met en œuvre une démarche complète de **modélisation actuarielle appliquée à la prévision de la sinistralité routière**.
+Ce projet met en œuvre une démarche complète de modélisation actuarielle appliquée à la prévision de la sinistralité routière.
 
 L'approche combine :
 
@@ -455,15 +446,10 @@ Le modèle restitue correctement la dynamique saisonnière globale des accidents
 
 Il présente cependant un léger lissage des pics printaniers observés en mai et juin.
 
-Ce projet illustre ainsi l'application d'une méthodologie de **modélisation statistique et actuarielle à la prévision de la sinistralité**, en combinant gestion des données, SQL, analyse statistique, séries temporelles et évaluation prédictive.
+Ce projet illustre l'application d'une méthodologie de modélisation statistique et actuarielle à la prévision de la sinistralité, en combinant gestion des données, SQL, analyse statistique, séries temporelles et évaluation prédictive.
 
 ---
 
 ## Projet d'actuariat
 
 Projet réalisé dans le cadre d'un travail de modélisation actuarielle appliquée à la prévision de la sinistralité routière.
-
-```
-
-**Important :** j'ai utilisé les noms `03_distributions.png`, `04_correlations.png`, etc. parce que ton README mentionne 8 graphiques, mais je ne les ai pas vus tous précisément dans tes captures. **Si les noms réels dans `docs/graphics` sont différents, GitHub affichera une image cassée.** Le principe est bon, mais il faut que les noms correspondent exactement aux fichiers, y compris les majuscules, minuscules, accents et underscores.
-```
