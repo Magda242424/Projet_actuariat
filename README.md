@@ -8,7 +8,6 @@
 
 ## Rapport complet
 
- **[Consulter le rapport HTML](docs/index.html)**
 
  **[Voir le rapport en ligne avec GitHub Pages](https://magda242424.github.io/Projet_actuariat/)**
 
