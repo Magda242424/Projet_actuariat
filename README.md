@@ -1,22 +1,5 @@
 
-Oui. Voici le **README complet**, sans emoji, pensé pour un recruteur, avec les **8 graphiques directement visibles dans le README**.
 
-Comme tes graphiques sont dans `docs/graphics/`, les chemins sont construits en conséquence.
-
-````markdown
-# Modélisation de la Sinistralité Routière par SARIMAX
-
-## Prévision des accidents corporels dans les Hauts-de-Seine (92)
-
----
-
-## Rapport complet
-
-Le rapport complet présente l'ensemble de la démarche de modélisation, depuis la préparation des données jusqu'à la validation des prévisions.
-
-**[Consulter le rapport HTML en ligne](https://magda242424.github.io/Projet_actuariat/)**
-
-**[Consulter le code source R Markdown](./_Projet_Actuariat_.Rmd)**
 
 ---
 
