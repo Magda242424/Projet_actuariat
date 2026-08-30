@@ -1,4 +1,3 @@
-
 # Modélisation de la Sinistralité Routière par SARIMAX
 
 ### Prévision des accidents corporels dans les Hauts-de-Seine (92)
